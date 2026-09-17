@@ -95,7 +95,7 @@ jobs:
 
           echo ""
           echo "========================================"
-          echo "        CF-IP-VLESS OUTPUT"
+          echo "        CF-IP OUTPUT"
           echo "========================================"
           echo ""
 
@@ -237,15 +237,15 @@ jobs:
           echo ""
 
           echo "Pages:"
-          echo "https://baidu163msn.github.io/CF-IP-VLESS/"
+          echo "https://baidu163msn.github.io/CF-IP/"
           echo ""
 
           echo "VLESS TXT:"
-          echo "https://baidu163msn.github.io/CF-IP-VLESS/all.txt"
+          echo "https://baidu163msn.github.io/CF-IP/all.txt"
           echo ""
 
           echo "Mihomo YAML:"
-          echo "https://baidu163msn.github.io/CF-IP-VLESS/all.yaml"
+          echo "https://baidu163msn.github.io/CF-IP/all.yaml"
 
           echo ""
 
@@ -311,7 +311,7 @@ jobs:
 
 
           {
-            echo "# 🚀 CF-IP-VLESS 生成结果"
+            echo "# 🚀 CF-IP 生成结果"
             echo ""
 
             echo "**生成时间：**"
@@ -368,13 +368,13 @@ jobs:
             echo "## 🌐 GitHub Pages"
             echo ""
 
-            echo "[打开订阅首页](https://baidu163msn.github.io/CF-IP-VLESS/)"
+            echo "[打开订阅首页](https://baidu163msn.github.io/CF-IP/)"
             echo ""
 
-            echo "[打开 VLESS all.txt](https://baidu163msn.github.io/CF-IP-VLESS/all.txt)"
+            echo "[打开 VLESS all.txt](https://baidu163msn.github.io/CF-IP/all.txt)"
             echo ""
 
-            echo "[打开 Mihomo all.yaml](https://baidu163msn.github.io/CF-IP-VLESS/all.yaml)"
+            echo "[打开 Mihomo all.yaml](https://baidu163msn.github.io/CF-IP/all.yaml)"
 
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -427,7 +427,7 @@ jobs:
 
           echo ""
           echo "========================================"
-          echo "       CF-IP-VLESS DEPLOYMENT"
+          echo "       CF-IP DEPLOYMENT"
           echo "========================================"
           echo ""
 
@@ -439,11 +439,11 @@ jobs:
           echo ""
 
           echo "VLESS TXT："
-          echo "https://baidu163msn.github.io/CF-IP-VLESS/all.txt"
+          echo "https://baidu163msn.github.io/CF-IP/all.txt"
           echo ""
 
           echo "Mihomo YAML："
-          echo "https://baidu163msn.github.io/CF-IP-VLESS/all.yaml"
+          echo "https://baidu163msn.github.io/CF-IP/all.yaml"
           echo ""
 
           echo "========================================"
@@ -451,7 +451,7 @@ jobs:
 
           {
             echo ""
-            echo "# ✅ CF-IP-VLESS 部署成功"
+            echo "# ✅ CF-IP 部署成功"
             echo ""
 
             echo "GitHub Pages 已成功部署。"
@@ -466,12 +466,12 @@ jobs:
             echo "📄 **VLESS：**"
             echo ""
 
-            echo "[all.txt](https://baidu163msn.github.io/CF-IP-VLESS/all.txt)"
+            echo "[all.txt](https://baidu163msn.github.io/CF-IP/all.txt)"
             echo ""
 
             echo "📄 **Mihomo：**"
             echo ""
 
-            echo "[all.yaml](https://baidu163msn.github.io/CF-IP-VLESS/all.yaml)"
+            echo "[all.yaml](https://baidu163msn.github.io/CF-IP/all.yaml)"
 
           } >> "$GITHUB_STEP_SUMMARY"
