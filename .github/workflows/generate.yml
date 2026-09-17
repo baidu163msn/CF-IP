@@ -1,4 +1,3 @@
-```yaml
 name: Generate VLESS subscriptions
 
 on:
@@ -675,4 +674,3 @@ PY
             echo "[all.yaml](https://baidu163msn.github.io/CF-IP/all.yaml)"
 
           } >> "$GITHUB_STEP_SUMMARY"
-```
