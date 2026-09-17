@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
 
   schedule:
-    # 每 30 分钟运行一次
     # GitHub Actions 使用 UTC
     - cron: "7,37 * * * *"
 
