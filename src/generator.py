@@ -1,12 +1,15 @@
+```python
 #!/usr/bin/env python3
 from __future__ import annotations
 
 import base64
 import concurrent.futures
 import ipaddress
+import json
 import re
 import socket
 import ssl
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -14,12 +17,31 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
 CFG = yaml.safe_load(
-    (ROOT / "config/config.yml").read_text(encoding="utf-8")
+    (ROOT / "config/config.yml").read_text(
+        encoding="utf-8"
+    )
 )
 
 OUT = ROOT / "output"
 OUT.mkdir(exist_ok=True)
+
+DATA = ROOT / "data"
+DATA.mkdir(exist_ok=True)
+
+HISTORY_FILE = DATA / "ip_history.json"
+
+# ============================================================
+# 历史池参数
+# ============================================================
+
+MAX_FAILURES = 3
+MAX_HISTORY = 5000
+
+# ============================================================
+# 正则
+# ============================================================
 
 REGION_RE = re.compile(
     r"\b(HK|JP|SG|KR|TW|US|DE|CN)\b",
@@ -33,16 +55,36 @@ IP_PORT_RE = re.compile(
 
 
 # ============================================================
+# 时间
+# ============================================================
+
+def now_iso():
+    return datetime.now(
+        timezone.utc
+    ).replace(
+        microsecond=0
+    ).isoformat()
+
+
+# ============================================================
 # 地区识别
 # ============================================================
 
-def region_from_comment(comment: str, source_name: str) -> str:
-    m = REGION_RE.search(comment or "")
+def region_from_comment(
+    comment: str,
+    source_name: str
+) -> str:
+
+    m = REGION_RE.search(
+        comment or ""
+    )
 
     if m:
         return m.group(1).upper()
 
-    text = (comment or "").lower()
+    text = (
+        comment or ""
+    ).lower()
 
     aliases = {
         "香港": "HK",
@@ -71,6 +113,7 @@ def region_from_comment(comment: str, source_name: str) -> str:
     }
 
     for key, value in aliases.items():
+
         if key in text:
             return value
 
@@ -82,13 +125,20 @@ def region_from_comment(comment: str, source_name: str) -> str:
 # ============================================================
 
 def normalize_address(raw: str):
+
     raw = raw.strip()
 
-    if raw.startswith("[") and raw.endswith("]"):
+    if (
+        raw.startswith("[")
+        and raw.endswith("]")
+    ):
         raw = raw[1:-1]
 
     try:
-        ip = ipaddress.ip_address(raw)
+
+        ip = ipaddress.ip_address(
+            raw
+        )
 
         return str(ip), (
             "ipv6"
@@ -97,8 +147,14 @@ def normalize_address(raw: str):
         )
 
     except ValueError:
-        # 允许域名
-        if re.fullmatch(r"[A-Za-z0-9.-]+", raw) and "." in raw:
+
+        if (
+            re.fullmatch(
+                r"[A-Za-z0-9.-]+",
+                raw
+            )
+            and "." in raw
+        ):
             return raw.lower(), "domain"
 
     return None, None
@@ -113,9 +169,15 @@ def parse_line(
     source_name: str,
     kind: str
 ):
+
     line = line.strip()
 
-    if not line or line.startswith(("#", ";", "//")):
+    if (
+        not line
+        or line.startswith(
+            ("#", ";", "//")
+        )
+    ):
         return None
 
     m = IP_PORT_RE.match(line)
@@ -123,25 +185,37 @@ def parse_line(
     if not m:
         return None
 
-    address, port_s, comment = m.groups()
+    address, port_s, comment = (
+        m.groups()
+    )
 
     port = int(port_s)
 
-    if not (1 <= port <= 65535):
+    if not (
+        1 <= port <= 65535
+    ):
         return None
 
-    address, addr_type = normalize_address(address)
+    address, addr_type = (
+        normalize_address(address)
+    )
 
     if not address:
         return None
 
-    if kind == "ip" and addr_type not in (
-        "ipv4",
-        "ipv6"
+    if (
+        kind == "ip"
+        and addr_type not in (
+            "ipv4",
+            "ipv6"
+        )
     ):
         return None
 
-    if kind == "domain" and addr_type != "domain":
+    if (
+        kind == "domain"
+        and addr_type != "domain"
+    ):
         return None
 
     region = region_from_comment(
@@ -164,12 +238,14 @@ def parse_line(
 # ============================================================
 
 def fetch_source(source):
+
     import urllib.request
 
     req = urllib.request.Request(
         source["url"],
         headers={
-            "User-Agent": "cf-vless-generator/1.0"
+            "User-Agent":
+                "cf-vless-generator/1.0"
         }
     )
 
@@ -185,18 +261,23 @@ def fetch_source(source):
 
 
 # ============================================================
-# 解析所有源
+# 当前数据源
 # ============================================================
 
 def parse_sources():
 
     all_items = []
 
+    source_success = 0
+    source_failed = 0
+
     for source in CFG["sources"]:
 
         try:
 
-            text = fetch_source(source)
+            text = fetch_source(
+                source
+            )
 
             count = 0
 
@@ -209,8 +290,14 @@ def parse_sources():
                 )
 
                 if item:
-                    all_items.append(item)
+
+                    all_items.append(
+                        item
+                    )
+
                     count += 1
+
+            source_success += 1
 
             print(
                 f"[OK] {source['name']}: "
@@ -219,8 +306,11 @@ def parse_sources():
 
         except Exception as e:
 
+            source_failed += 1
+
             print(
-                f"[WARN] {source['name']}: {e}"
+                f"[WARN] "
+                f"{source['name']}: {e}"
             )
 
     # ========================================================
@@ -240,14 +330,240 @@ def parse_sources():
         if key not in seen:
 
             seen.add(key)
-            result.append(item)
+
+            result.append(
+                item
+            )
 
     print(
-        f"[INFO] unique candidates: "
+        f"[INFO] source success: "
+        f"{source_success}"
+    )
+
+    print(
+        f"[INFO] source failed: "
+        f"{source_failed}"
+    )
+
+    print(
+        f"[INFO] current unique candidates: "
         f"{len(result)}"
     )
 
     return result
+
+
+# ============================================================
+# 历史池读取
+# ============================================================
+
+def load_history():
+
+    if not HISTORY_FILE.exists():
+
+        print(
+            "[INFO] history: "
+            "no previous history"
+        )
+
+        return {}
+
+    try:
+
+        data = json.loads(
+            HISTORY_FILE.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        if not isinstance(
+            data,
+            dict
+        ):
+            return {}
+
+        print(
+            f"[INFO] history loaded: "
+            f"{len(data)}"
+        )
+
+        return data
+
+    except Exception as e:
+
+        print(
+            f"[WARN] history load failed: "
+            f"{e}"
+        )
+
+        return {}
+
+
+# ============================================================
+# 历史池保存
+# ============================================================
+
+def save_history(history):
+
+    HISTORY_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    tmp = HISTORY_FILE.with_suffix(
+        ".tmp"
+    )
+
+    tmp.write_text(
+        json.dumps(
+            history,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True
+        ) + "\n",
+        encoding="utf-8"
+    )
+
+    tmp.replace(
+        HISTORY_FILE
+    )
+
+
+# ============================================================
+# 历史 IP Key
+# ============================================================
+
+def item_key(item):
+
+    return (
+        f"{item['address']}:"
+        f"{item['port']}"
+    )
+
+
+# ============================================================
+# 历史池 + 当前数据源
+# ============================================================
+
+def merge_history(
+    current_items,
+    history
+):
+
+    merged = {}
+
+    current_keys = set()
+
+    # --------------------------------------------------------
+    # 先放当前数据源
+    # 当前源拥有最高优先级
+    # --------------------------------------------------------
+
+    for item in current_items:
+
+        key = item_key(item)
+
+        current_keys.add(key)
+
+        old = history.get(
+            key,
+            {}
+        )
+
+        item["history"] = True
+        item["source_current"] = True
+        item["failures"] = int(
+            old.get(
+                "failures",
+                0
+            )
+        )
+
+        item["first_seen"] = (
+            old.get(
+                "first_seen",
+                now_iso()
+            )
+        )
+
+        item["last_seen"] = now_iso()
+
+        merged[key] = item
+
+    # --------------------------------------------------------
+    # 再加入历史中已经消失的数据源 IP
+    # --------------------------------------------------------
+
+    for key, old in history.items():
+
+        if key in merged:
+            continue
+
+        try:
+
+            address = old["address"]
+            port = int(old["port"])
+
+        except Exception:
+            continue
+
+        item = {
+            "address": address,
+            "port": port,
+            "region": old.get(
+                "region",
+                "OTHER"
+            ),
+            "comment": old.get(
+                "comment",
+                ""
+            ),
+            "source": old.get(
+                "source",
+                "HISTORY"
+            ),
+            "type": old.get(
+                "type",
+                "ipv4"
+            ),
+            "history": True,
+            "source_current": False,
+            "failures": int(
+                old.get(
+                    "failures",
+                    0
+                )
+            ),
+            "first_seen": old.get(
+                "first_seen",
+                now_iso()
+            ),
+            "last_seen": old.get(
+                "last_seen",
+                ""
+            ),
+        }
+
+        merged[key] = item
+
+    history_only = (
+        len(merged)
+        - len(current_keys)
+    )
+
+    print(
+        f"[INFO] merged candidates: "
+        f"{len(merged)}"
+    )
+
+    print(
+        f"[INFO] historical candidates: "
+        f"{history_only}"
+    )
+
+    return list(
+        merged.values()
+    )
 
 
 # ============================================================
@@ -274,16 +590,25 @@ def tcp_tls_test(item):
             timeout=timeout
         ) as sock:
 
-            sock.settimeout(tls_timeout)
+            sock.settimeout(
+                tls_timeout
+            )
 
-            ctx = ssl.create_default_context()
+            ctx = (
+                ssl.create_default_context()
+            )
 
             ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+
+            ctx.verify_mode = (
+                ssl.CERT_NONE
+            )
 
             with ctx.wrap_socket(
                 sock,
-                server_hostname=CFG["template"]["sni"]
+                server_hostname=CFG[
+                    "template"
+                ]["sni"]
             ) as ssock:
 
                 return (
@@ -303,6 +628,10 @@ def tcp_tls_test(item):
 def test_candidates(items):
 
     if not CFG["test"]["enabled"]:
+
+        for item in items:
+            item["health_ok"] = True
+
         return items
 
     good = []
@@ -331,44 +660,285 @@ def test_candidates(items):
 
             try:
 
-                ok, detail = future.result()
+                ok, detail = (
+                    future.result()
+                )
 
             except Exception as e:
 
                 ok = False
                 detail = str(e)
 
+            key = item_key(item)
+
             if ok:
 
                 item["tls"] = detail
+                item["health_ok"] = True
+                item["failures"] = 0
+                item["last_success"] = (
+                    now_iso()
+                )
+
                 good.append(item)
+
+            else:
+
+                item["health_ok"] = False
+
+                old_failures = int(
+                    item.get(
+                        "failures",
+                        0
+                    )
+                )
+
+                item["failures"] = (
+                    old_failures + 1
+                )
+
+                item["last_failure"] = (
+                    now_iso()
+                )
+
+                item["last_error"] = (
+                    detail
+                )
+
+    passed = len(good)
+
+    failed = (
+        len(items)
+        - passed
+    )
 
     print(
         f"[INFO] health passed: "
-        f"{len(good)}/{len(items)}"
+        f"{passed}/{len(items)}"
+    )
+
+    print(
+        f"[INFO] health failed: "
+        f"{failed}"
     )
 
     return good
 
 
 # ============================================================
+# 更新历史池
+# ============================================================
+
+def update_history(
+    tested_items,
+    history
+):
+
+    new_history = {}
+
+    new_count = 0
+    retained_count = 0
+    failed_count = 0
+    removed_count = 0
+
+    for item in tested_items:
+
+        key = item_key(item)
+
+        was_history = (
+            key in history
+        )
+
+        if item.get(
+            "health_ok",
+            False
+        ):
+
+            if was_history:
+                retained_count += 1
+            else:
+                new_count += 1
+
+            new_history[key] = {
+                "address": item[
+                    "address"
+                ],
+                "port": item[
+                    "port"
+                ],
+                "region": item[
+                    "region"
+                ],
+                "comment": item[
+                    "comment"
+                ],
+                "source": item[
+                    "source"
+                ],
+                "type": item[
+                    "type"
+                ],
+                "failures": 0,
+                "first_seen": item.get(
+                    "first_seen",
+                    now_iso()
+                ),
+                "last_seen": now_iso(),
+                "last_success": item.get(
+                    "last_success",
+                    now_iso()
+                ),
+            }
+
+        else:
+
+            failures = int(
+                item.get(
+                    "failures",
+                    0
+                )
+            )
+
+            if failures < MAX_FAILURES:
+
+                failed_count += 1
+
+                new_history[key] = {
+                    "address": item[
+                        "address"
+                    ],
+                    "port": item[
+                        "port"
+                    ],
+                    "region": item[
+                        "region"
+                    ],
+                    "comment": item[
+                        "comment"
+                    ],
+                    "source": item[
+                        "source"
+                    ],
+                    "type": item[
+                        "type"
+                    ],
+                    "failures": failures,
+                    "first_seen": item.get(
+                        "first_seen",
+                        now_iso()
+                    ),
+                    "last_seen": item.get(
+                        "last_seen",
+                        ""
+                    ),
+                    "last_failure": item.get(
+                        "last_failure",
+                        now_iso()
+                    ),
+                    "last_error": item.get(
+                        "last_error",
+                        ""
+                    ),
+                }
+
+            else:
+
+                removed_count += 1
+
+    # --------------------------------------------------------
+    # 历史池最大容量
+    # --------------------------------------------------------
+
+    if len(new_history) > MAX_HISTORY:
+
+        def sort_key(pair):
+
+            value = pair[1]
+
+            return (
+                int(
+                    value.get(
+                        "failures",
+                        0
+                    )
+                ),
+                value.get(
+                    "last_success",
+                    ""
+                ),
+            )
+
+        sorted_history = sorted(
+            new_history.items(),
+            key=sort_key,
+            reverse=True
+        )
+
+        new_history = dict(
+            sorted_history[
+                :MAX_HISTORY
+            ]
+        )
+
+    save_history(
+        new_history
+    )
+
+    print(
+        f"[HISTORY] new: "
+        f"{new_count}"
+    )
+
+    print(
+        f"[HISTORY] retained: "
+        f"{retained_count}"
+    )
+
+    print(
+        f"[HISTORY] temporary failed: "
+        f"{failed_count}"
+    )
+
+    print(
+        f"[HISTORY] removed: "
+        f"{removed_count}"
+    )
+
+    print(
+        f"[HISTORY] total: "
+        f"{len(new_history)}"
+    )
+
+    return new_history
+
+
+# ============================================================
 # 生成 VLESS URI
 # ============================================================
 
-def vless_node(item, index):
+def vless_node(
+    item,
+    index
+):
 
     t = CFG["template"]
 
-    name = CFG["output"]["naming"].format(
+    name = CFG["output"][
+        "naming"
+    ].format(
         REGION=item["region"],
         INDEX=index
     )
 
-    # IPv6 必须使用 []
-    address = item["address"]
+    address = item[
+        "address"
+    ]
 
     if item["type"] == "ipv6":
-        address = f"[{address}]"
+
+        address = (
+            f"[{address}]"
+        )
 
     params = (
         f"path={quote(t['path'], safe='')}"
@@ -394,7 +964,7 @@ def vless_node(item, index):
 
 
 # ============================================================
-# TXT：Base64 VLESS Subscription
+# TXT
 # ============================================================
 
 def write_subscription(
@@ -402,7 +972,9 @@ def write_subscription(
     nodes
 ):
 
-    payload = "\n".join(nodes)
+    payload = "\n".join(
+        nodes
+    )
 
     if nodes:
         payload += "\n"
@@ -418,7 +990,7 @@ def write_subscription(
 
 
 # ============================================================
-# Mihomo / Clash Proxy
+# Mihomo Proxy
 # ============================================================
 
 def clash_proxy(
@@ -428,7 +1000,9 @@ def clash_proxy(
 
     t = CFG["template"]
 
-    name = CFG["output"]["naming"].format(
+    name = CFG["output"][
+        "naming"
+    ].format(
         REGION=item["region"],
         INDEX=index
     )
@@ -436,11 +1010,17 @@ def clash_proxy(
     proxy = {
         "name": name,
         "type": "vless",
-        "server": item["address"],
-        "port": item["port"],
+        "server": item[
+            "address"
+        ],
+        "port": item[
+            "port"
+        ],
         "uuid": t["uuid"],
         "udp": True,
-        "tls": str(t["security"]).lower() == "tls",
+        "tls": str(
+            t["security"]
+        ).lower() == "tls",
         "servername": t["sni"],
         "client-fingerprint": t["fp"],
         "skip-cert-verify": bool(
@@ -448,15 +1028,16 @@ def clash_proxy(
         ),
     }
 
-    # ========================================================
-    # ALPN
-    # ========================================================
-
-    alpn = t.get("alpn")
+    alpn = t.get(
+        "alpn"
+    )
 
     if alpn:
 
-        if isinstance(alpn, str):
+        if isinstance(
+            alpn,
+            str
+        ):
 
             alpn_list = [
                 x.strip()
@@ -464,7 +1045,10 @@ def clash_proxy(
                 if x.strip()
             ]
 
-        elif isinstance(alpn, list):
+        elif isinstance(
+            alpn,
+            list
+        ):
 
             alpn_list = alpn
 
@@ -473,14 +1057,15 @@ def clash_proxy(
             alpn_list = []
 
         if alpn_list:
-            proxy["alpn"] = alpn_list
-
-    # ========================================================
-    # WebSocket
-    # ========================================================
+            proxy["alpn"] = (
+                alpn_list
+            )
 
     transport_type = str(
-        t.get("type", "")
+        t.get(
+            "type",
+            ""
+        )
     ).lower()
 
     if transport_type == "ws":
@@ -494,10 +1079,6 @@ def clash_proxy(
             }
         }
 
-    # ========================================================
-    # gRPC
-    # ========================================================
-
     elif transport_type == "grpc":
 
         proxy["network"] = "grpc"
@@ -508,23 +1089,22 @@ def clash_proxy(
         )
 
         proxy["grpc-opts"] = {
-            "grpc-service-name": service_name
+            "grpc-service-name":
+                service_name
         }
-
-    # ========================================================
-    # 其他传输
-    # ========================================================
 
     else:
 
         if transport_type:
-            proxy["network"] = transport_type
+            proxy["network"] = (
+                transport_type
+            )
 
     return proxy
 
 
 # ============================================================
-# YAML：Mihomo / Clash 配置
+# YAML
 # ============================================================
 
 def write_clash_yaml(
@@ -559,7 +1139,7 @@ def write_clash_yaml(
 
 
 # ============================================================
-# 生成首页
+# 首页
 # ============================================================
 
 def write_index():
@@ -603,7 +1183,9 @@ def write_index():
         "</html>"
     )
 
-    (OUT / "index.html").write_text(
+    (
+        OUT / "index.html"
+    ).write_text(
         html,
         encoding="utf-8"
     )
@@ -617,6 +1199,7 @@ def main():
 
     # ========================================================
     # 清理旧输出
+    # 注意：只清理 output，不碰 data/history
     # ========================================================
 
     for p in OUT.glob("*"):
@@ -625,17 +1208,103 @@ def main():
             p.unlink()
 
     # ========================================================
-    # 获取候选 IP
+    # 当前数据源
     # ========================================================
 
-    candidates = parse_sources()
+    current_items = (
+        parse_sources()
+    )
+
+    # ========================================================
+    # 历史池
+    # ========================================================
+
+    history = load_history()
+
+    candidates = merge_history(
+        current_items,
+        history
+    )
 
     # ========================================================
     # 健康检测
     # ========================================================
 
-    good = test_candidates(
+    tested = test_candidates(
         candidates
+    )
+
+    # ========================================================
+    # 更新历史池
+    # ========================================================
+
+    updated_history = (
+        update_history(
+            candidates,
+            history
+        )
+    )
+
+    # ========================================================
+    # 只使用本轮健康通过的节点
+    # ========================================================
+
+    good = [
+        item
+        for item in candidates
+        if item.get(
+            "health_ok",
+            False
+        )
+    ]
+
+    # ========================================================
+    # 统计当前源 / 历史保留
+    # ========================================================
+
+    current_good = [
+        item
+        for item in good
+        if item.get(
+            "source_current",
+            False
+        )
+    ]
+
+    retained_good = [
+        item
+        for item in good
+        if not item.get(
+            "source_current",
+            False
+        )
+    ]
+
+    print(
+        f"[INFO] healthy current-source: "
+        f"{len(current_good)}"
+    )
+
+    print(
+        f"[INFO] healthy historical-retained: "
+        f"{len(retained_good)}"
+    )
+
+    print(
+        f"[INFO] healthy total: "
+        f"{len(good)}"
+    )
+
+    # ========================================================
+    # 历史有效 IP 优先
+    #
+    # 这样数据源发生变化时，
+    # 已经验证过的旧 IP 不会轻易被新 IP 顶掉。
+    # ========================================================
+
+    good = (
+        retained_good
+        + current_good
     )
 
     # ========================================================
@@ -656,31 +1325,33 @@ def main():
     # ========================================================
 
     all_nodes = []
-
     all_items = []
 
     maxn = int(
-        CFG["output"]["max_nodes_per_region"]
+        CFG["output"][
+            "max_nodes_per_region"
+        ]
     )
 
     # ========================================================
-    # 按地区生成 TXT + YAML
+    # 地区 TXT + YAML
     # ========================================================
 
     for region, items in sorted(
         grouped.items()
     ):
 
-        # 每个地区最多 max_nodes_per_region
-        items = items[:maxn]
+        items = items[
+            :maxn
+        ]
 
         if not items:
             continue
 
-        # 保存最终选中的 IP
-        all_items.extend(items)
+        all_items.extend(
+            items
+        )
 
-        # 生成 VLESS URI
         nodes = [
             vless_node(
                 item,
@@ -692,41 +1363,35 @@ def main():
             )
         ]
 
-        region_name = region.lower()
-
-        # ----------------------------------------------------
-        # TXT
-        # ----------------------------------------------------
+        region_name = (
+            region.lower()
+        )
 
         write_subscription(
             OUT / f"{region_name}.txt",
             nodes
         )
 
-        # ----------------------------------------------------
-        # YAML
-        # ----------------------------------------------------
-
         write_clash_yaml(
             OUT / f"{region_name}.yaml",
             items
         )
 
-        all_nodes.extend(nodes)
+        all_nodes.extend(
+            nodes
+        )
 
     # ========================================================
-    # ALL TXT + ALL YAML
+    # ALL
     # ========================================================
 
     if all_nodes:
 
-        # Base64 VLESS
         write_subscription(
             OUT / "all.txt",
             all_nodes
         )
 
-        # Mihomo / Clash
         write_clash_yaml(
             OUT / "all.yaml",
             all_items
@@ -746,16 +1411,18 @@ def main():
         f"{len(all_items)} Mihomo proxies"
     )
 
+    print(
+        f"[DONE] history file: "
+        f"{HISTORY_FILE}"
+    )
+
     # ========================================================
-    # 生成首页
+    # 首页
     # ========================================================
 
     write_index()
 
 
-# ============================================================
-# ENTRY
-# ============================================================
-
 if __name__ == "__main__":
     main()
+```
