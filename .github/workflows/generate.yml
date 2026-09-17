@@ -40,7 +40,7 @@ concurrency:
 jobs:
 
   # ==========================================================
-  # 生成订阅
+  # Generate
   # ==========================================================
 
   generate:
@@ -88,6 +88,74 @@ jobs:
 
 
       # ======================================================
+      # 验证输出
+      #
+      # 如果没有 all.txt / all.yaml
+      # 或者最终节点数为 0
+      # 直接让 Workflow 失败。
+      # ======================================================
+
+      - name: Validate output
+        shell: bash
+        run: |
+
+          set -e
+
+          if [ ! -f "output/all.txt" ]; then
+            echo "[ERROR] output/all.txt not found."
+            exit 1
+          fi
+
+          if [ ! -f "output/all.yaml" ]; then
+            echo "[ERROR] output/all.yaml not found."
+            exit 1
+          fi
+
+          TXT_COUNT=$(
+            base64 -d output/all.txt 2>/dev/null \
+              | awk '
+                  /^vless:\/\// {
+                    n++
+                  }
+                  END {
+                    print n+0
+                  }
+                '
+          )
+
+          YAML_COUNT=$(
+            awk '
+              /^[[:space:]]*-[[:space:]]name:/ {
+                n++
+              }
+              END {
+                print n+0
+              }
+            ' output/all.yaml
+          )
+
+          echo "[CHECK] TXT nodes : $TXT_COUNT"
+          echo "[CHECK] YAML nodes: $YAML_COUNT"
+
+          if [ "$TXT_COUNT" -le 0 ]; then
+            echo "[ERROR] all.txt contains zero VLESS nodes."
+            exit 1
+          fi
+
+          if [ "$YAML_COUNT" -le 0 ]; then
+            echo "[ERROR] all.yaml contains zero Mihomo nodes."
+            exit 1
+          fi
+
+          if [ "$TXT_COUNT" -ne "$YAML_COUNT" ]; then
+            echo "[ERROR] TXT/YAML node count mismatch."
+            exit 1
+          fi
+
+          echo "[OK] output validation passed."
+
+
+      # ======================================================
       # OUTPUT
       # ======================================================
 
@@ -105,30 +173,37 @@ jobs:
           echo ""
 
           # --------------------------------------------------
-          # 检查历史文件
+          # 历史池统计
           # --------------------------------------------------
 
           if [ -f "data/ip_history.json" ]; then
+
             HISTORY_COUNT=$(
               python - <<'PY'
-          import json
+import json
 
-          with open(
-              "data/ip_history.json",
-              "r",
-              encoding="utf-8"
-          ) as f:
-              data = json.load(f)
+with open(
+    "data/ip_history.json",
+    "r",
+    encoding="utf-8"
+) as f:
+    data = json.load(f)
 
-          print(len(data))
-          PY
+print(len(data))
+PY
             )
+
           else
+
             HISTORY_COUNT=0
+
           fi
 
-          echo "历史有效 IP 池：$HISTORY_COUNT"
+          echo "历史 IP 池：$HISTORY_COUNT"
+          echo "淘汰规则：连续 3 次健康检查失败"
+          echo "历史池上限：5000"
           echo ""
+
 
           # --------------------------------------------------
           # Base64 TXT 节点统计
@@ -199,6 +274,7 @@ jobs:
               "output/all.yaml"
           )
 
+
           echo "最终 VLESS 节点：$TOTAL_TXT"
           echo "最终 Mihomo 节点：$TOTAL_YAML"
           echo ""
@@ -259,8 +335,8 @@ jobs:
             "$TOTAL_YAML"
 
           echo "----------------------------------------"
-
           echo ""
+
           echo "Pages:"
           echo "https://baidu163msn.github.io/CF-IP/"
           echo ""
@@ -331,9 +407,14 @@ jobs:
           }
 
 
-          TOTAL=$(
+          TOTAL_TXT=$(
             count_txt_nodes \
               "output/all.txt"
+          )
+
+          TOTAL_YAML=$(
+            count_yaml_nodes \
+              "output/all.yaml"
           )
 
 
@@ -341,17 +422,17 @@ jobs:
 
             HISTORY_COUNT=$(
               python - <<'PY'
-          import json
+import json
 
-          with open(
-              "data/ip_history.json",
-              "r",
-              encoding="utf-8"
-          ) as f:
-              data = json.load(f)
+with open(
+    "data/ip_history.json",
+    "r",
+    encoding="utf-8"
+) as f:
+    data = json.load(f)
 
-          print(len(data))
-          PY
+print(len(data))
+PY
             )
 
           else
@@ -375,6 +456,7 @@ jobs:
 
             echo "| 地区 | VLESS TXT | Mihomo YAML |"
             echo "|:---|---:|---:|"
+
 
             for region in \
               hk \
@@ -407,18 +489,29 @@ jobs:
 
             done
 
+
             echo ""
 
             echo "## 🗃️ 历史 IP 池"
             echo ""
+
             echo "**${HISTORY_COUNT} 个 IP**"
             echo ""
-            echo "规则：连续 3 次健康检查失败后淘汰。"
+
+            echo "- 当前源 IP 与历史 IP 一起健康检查"
+            echo "- 源站消失但仍健康的 IP 继续保留"
+            echo "- 连续 3 次健康检查失败后淘汰"
+            echo "- 历史池上限：5000"
+
             echo ""
 
             echo "## 📦 总计"
             echo ""
-            echo "**${TOTAL} 个 VLESS 节点**"
+
+            echo "**${TOTAL_TXT} 个 VLESS 节点**"
+            echo ""
+
+            echo "**${TOTAL_YAML} 个 Mihomo 节点**"
             echo ""
 
             echo "## 🌐 GitHub Pages"
@@ -438,14 +531,21 @@ jobs:
       # ======================================================
       # 提交历史 IP 池
       #
-      # 注意：
-      # data/ip_history.json 不在 push.paths 中，
-      # 因此不会因为这个 commit 再次触发本 Workflow。
+      # 关键修复：
+      # 先 git add，再使用 git diff --cached。
+      #
+      # 这样第一次创建 data/ip_history.json
+      # 也可以正常提交。
+      #
+      # data/** 不在 push.paths 中，
+      # 所以历史 commit 不会再次触发本 Workflow。
       # ======================================================
 
       - name: Save IP history
         shell: bash
         run: |
+
+          set -e
 
           git config user.name \
             "github-actions[bot]"
@@ -454,13 +554,24 @@ jobs:
             "41898282+github-actions[bot]@users.noreply.github.com"
 
 
-          if git diff --quiet -- data/ip_history.json; then
+          if [ ! -f "data/ip_history.json" ]; then
+
+            echo "[ERROR] data/ip_history.json was not generated."
+            exit 1
+
+          fi
+
+
+          git add data/ip_history.json
+
+
+          if git diff --cached --quiet; then
 
             echo "[INFO] IP history unchanged."
 
           else
 
-            git add data/ip_history.json
+            echo "[INFO] Updating IP history..."
 
             git commit \
               -m "chore: update IP history"
@@ -471,7 +582,7 @@ jobs:
 
 
       # ======================================================
-      # 上传 GitHub Pages
+      # 上传 GitHub Pages artifact
       # ======================================================
 
       - name: Upload Pages artifact
@@ -492,11 +603,14 @@ jobs:
 
     environment:
       name: github-pages
-
       url: ${{ steps.deployment.outputs.page_url }}
 
 
     steps:
+
+      # ------------------------------------------------------
+      # Deploy
+      # ------------------------------------------------------
 
       - name: Deploy to GitHub Pages
         id: deployment
@@ -504,7 +618,7 @@ jobs:
 
 
       # ======================================================
-      # 部署结果
+      # Deployment OUTPUT
       # ======================================================
 
       - name: Deployment OUTPUT
