@@ -1,21 +1,12 @@
 # cf-vless-generator
 # 所有可变参数集中在这里，GitHub Actions / Python 无需修改。
 sources:
-  - name: love_ztm
+  - name: LZ
     url: https://raw.githubusercontent.com/love-ztm/cfip/refs/heads/main/ubest_ips.txt
     kind: ip
-  - name: junzhen
+  - name: MJZ
     url: https://cf.junzhen.qzz.io/best_ips.txt
     kind: ip
-  - name: s5gy
-    url: https://bestcf.pages.dev/s5gy/mini.txt
-    kind: ip
-  - name: tiancheng
-    url: https://bestcf.pages.dev/tiancheng/mini.txt
-    kind: ip
-  - name: domain_asia
-    url: https://bestcf.pages.dev/domain/Domain-Asia.txt
-    kind: domain
 
 template:
   uuid: "2a2038c5-a62c-4f59-af4f-733426d37193"
