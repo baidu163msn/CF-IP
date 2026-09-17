@@ -1,3 +1,4 @@
+```yaml
 name: Generate VLESS subscriptions
 
 on:
@@ -5,7 +6,8 @@ on:
 
   schedule:
     # GitHub Actions 使用 UTC
-    - cron: "7,37 * * * *"
+    # 每小时第 7 分钟执行一次
+    - cron: "7 * * * *"
 
   push:
     paths:
@@ -17,17 +19,17 @@ on:
 
 
 # ============================================================
-# GitHub Pages 权限
+# GitHub Actions 权限
 # ============================================================
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
 
 # ============================================================
-# 防止多个 Pages 部署同时进行
+# 防止多个运行同时修改历史池 / Pages
 # ============================================================
 
 concurrency:
@@ -76,9 +78,9 @@ jobs:
             -r requirements.txt
 
 
-      # ------------------------------------------------------
-      # 生成 TXT + YAML
-      # ------------------------------------------------------
+      # ======================================================
+      # 生成 TXT + YAML + 历史 IP
+      # ======================================================
 
       - name: Generate subscriptions
         run: |
@@ -95,16 +97,41 @@ jobs:
 
           echo ""
           echo "========================================"
-          echo "        CF-IP OUTPUT"
+          echo "          CF-IP OUTPUT"
           echo "========================================"
           echo ""
 
           echo "生成时间：$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo ""
 
+          # --------------------------------------------------
+          # 检查历史文件
+          # --------------------------------------------------
+
+          if [ -f "data/ip_history.json" ]; then
+            HISTORY_COUNT=$(
+              python - <<'PY'
+          import json
+
+          with open(
+              "data/ip_history.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
+              data = json.load(f)
+
+          print(len(data))
+          PY
+            )
+          else
+            HISTORY_COUNT=0
+          fi
+
+          echo "历史有效 IP 池：$HISTORY_COUNT"
+          echo ""
 
           # --------------------------------------------------
-          # 统计 Base64 VLESS TXT 节点
+          # Base64 TXT 节点统计
           # --------------------------------------------------
 
           count_txt_nodes() {
@@ -132,7 +159,7 @@ jobs:
 
 
           # --------------------------------------------------
-          # 统计 YAML proxies
+          # YAML 节点统计
           # --------------------------------------------------
 
           count_yaml_nodes() {
@@ -158,10 +185,22 @@ jobs:
           }
 
 
-          TOTAL=$(count_txt_nodes "output/all.txt")
+          # --------------------------------------------------
+          # ALL
+          # --------------------------------------------------
 
+          TOTAL_TXT=$(
+            count_txt_nodes \
+              "output/all.txt"
+          )
 
-          echo "节点总数：$TOTAL"
+          TOTAL_YAML=$(
+            count_yaml_nodes \
+              "output/all.yaml"
+          )
+
+          echo "最终 VLESS 节点：$TOTAL_TXT"
+          echo "最终 Mihomo 节点：$TOTAL_YAML"
           echo ""
 
           echo "----------------------------------------"
@@ -212,30 +251,16 @@ jobs:
           done
 
 
-          # --------------------------------------------------
-          # ALL
-          # --------------------------------------------------
-
           echo "----------------------------------------"
-
-          all_txt_count=$(
-            count_txt_nodes \
-              "output/all.txt"
-          )
-
-          all_yaml_count=$(
-            count_yaml_nodes \
-              "output/all.yaml"
-          )
 
           printf "%-18s %8s %8s\n" \
             "ALL" \
-            "$all_txt_count" \
-            "$all_yaml_count"
+            "$TOTAL_TXT" \
+            "$TOTAL_YAML"
 
           echo "----------------------------------------"
-          echo ""
 
+          echo ""
           echo "Pages:"
           echo "https://baidu163msn.github.io/CF-IP/"
           echo ""
@@ -246,7 +271,6 @@ jobs:
 
           echo "Mihomo YAML:"
           echo "https://baidu163msn.github.io/CF-IP/all.yaml"
-
           echo ""
 
           echo "========================================"
@@ -307,7 +331,34 @@ jobs:
           }
 
 
-          TOTAL=$(count_txt_nodes "output/all.txt")
+          TOTAL=$(
+            count_txt_nodes \
+              "output/all.txt"
+          )
+
+
+          if [ -f "data/ip_history.json" ]; then
+
+            HISTORY_COUNT=$(
+              python - <<'PY'
+          import json
+
+          with open(
+              "data/ip_history.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
+              data = json.load(f)
+
+          print(len(data))
+          PY
+            )
+
+          else
+
+            HISTORY_COUNT=0
+
+          fi
 
 
           {
@@ -324,7 +375,6 @@ jobs:
 
             echo "| 地区 | VLESS TXT | Mihomo YAML |"
             echo "|:---|---:|---:|"
-
 
             for region in \
               hk \
@@ -357,11 +407,17 @@ jobs:
 
             done
 
-
             echo ""
+
+            echo "## 🗃️ 历史 IP 池"
+            echo ""
+            echo "**${HISTORY_COUNT} 个 IP**"
+            echo ""
+            echo "规则：连续 3 次健康检查失败后淘汰。"
+            echo ""
+
             echo "## 📦 总计"
             echo ""
-
             echo "**${TOTAL} 个 VLESS 节点**"
             echo ""
 
@@ -377,6 +433,41 @@ jobs:
             echo "[打开 Mihomo all.yaml](https://baidu163msn.github.io/CF-IP/all.yaml)"
 
           } >> "$GITHUB_STEP_SUMMARY"
+
+
+      # ======================================================
+      # 提交历史 IP 池
+      #
+      # 注意：
+      # data/ip_history.json 不在 push.paths 中，
+      # 因此不会因为这个 commit 再次触发本 Workflow。
+      # ======================================================
+
+      - name: Save IP history
+        shell: bash
+        run: |
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+          if git diff --quiet -- data/ip_history.json; then
+
+            echo "[INFO] IP history unchanged."
+
+          else
+
+            git add data/ip_history.json
+
+            git commit \
+              -m "chore: update IP history"
+
+            git push
+
+          fi
 
 
       # ======================================================
@@ -400,7 +491,6 @@ jobs:
     runs-on: ubuntu-latest
 
     environment:
-
       name: github-pages
 
       url: ${{ steps.deployment.outputs.page_url }}
@@ -409,9 +499,7 @@ jobs:
     steps:
 
       - name: Deploy to GitHub Pages
-
         id: deployment
-
         uses: actions/deploy-pages@v4
 
 
@@ -420,9 +508,7 @@ jobs:
       # ======================================================
 
       - name: Deployment OUTPUT
-
         shell: bash
-
         run: |
 
           echo ""
@@ -475,3 +561,4 @@ jobs:
             echo "[all.yaml](https://baidu163msn.github.io/CF-IP/all.yaml)"
 
           } >> "$GITHUB_STEP_SUMMARY"
+```
