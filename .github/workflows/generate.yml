@@ -1,676 +1,220 @@
 name: Generate VLESS subscriptions
 
 on:
-  workflow_dispatch:
+workflow_dispatch:
 
-  schedule:
-    # GitHub Actions 使用 UTC
-    # 每小时第 7 分钟执行一次
-    - cron: "7 * * * *"
+schedule:
+# GitHub Actions 使用 UTC
+# 每小时第 7 分钟执行
+- cron: "7 * * * *"
 
-  push:
-    paths:
-      - "config/**"
-      - "templates/**"
-      - "src/**"
-      - ".github/workflows/**"
-      - "requirements.txt"
-
-
-# ============================================================
-# GitHub Actions 权限
-# ============================================================
+push:
+paths:
+- "config/"
+- "templates/"
+- "src/"
+- ".github/workflows/"
+- "requirements.txt"
 
 permissions:
-  contents: write
-  pages: write
-  id-token: write
-
-
-# ============================================================
-# 防止多个运行同时修改历史池 / Pages
-# ============================================================
+contents: write
+pages: write
+id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
-
+group: cf-ip-pages
+cancel-in-progress: true
 
 jobs:
 
-  # ==========================================================
-  # Generate
-  # ==========================================================
-
-  generate:
-
-    runs-on: ubuntu-latest
-
-    steps:
-
-      # ------------------------------------------------------
-      # Checkout
-      # ------------------------------------------------------
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-
-      # ------------------------------------------------------
-      # Python
-      # ------------------------------------------------------
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-
-      # ------------------------------------------------------
-      # 安装依赖
-      # ------------------------------------------------------
-
-      - name: Install dependencies
-        run: |
-          python -m pip install \
-            --disable-pip-version-check \
-            -r requirements.txt
-
-
-      # ======================================================
-      # 生成 TXT + YAML + 历史 IP
-      # ======================================================
-
-      - name: Generate subscriptions
-        run: |
-          python src/generator.py
-
-
-      # ======================================================
-      # 验证输出
-      #
-      # 如果没有 all.txt / all.yaml
-      # 或者最终节点数为 0
-      # 直接让 Workflow 失败。
-      # ======================================================
-
-      - name: Validate output
-        shell: bash
-        run: |
-
-          set -e
-
-          if [ ! -f "output/all.txt" ]; then
-            echo "[ERROR] output/all.txt not found."
-            exit 1
-          fi
-
-          if [ ! -f "output/all.yaml" ]; then
-            echo "[ERROR] output/all.yaml not found."
-            exit 1
-          fi
-
-          TXT_COUNT=$(
-            base64 -d output/all.txt 2>/dev/null \
-              | awk '
-                  /^vless:\/\// {
-                    n++
-                  }
-                  END {
-                    print n+0
-                  }
-                '
-          )
-
-          YAML_COUNT=$(
-            awk '
-              /^[[:space:]]*-[[:space:]]name:/ {
-                n++
-              }
-              END {
-                print n+0
-              }
-            ' output/all.yaml
-          )
-
-          echo "[CHECK] TXT nodes : $TXT_COUNT"
-          echo "[CHECK] YAML nodes: $YAML_COUNT"
-
-          if [ "$TXT_COUNT" -le 0 ]; then
-            echo "[ERROR] all.txt contains zero VLESS nodes."
-            exit 1
-          fi
-
-          if [ "$YAML_COUNT" -le 0 ]; then
-            echo "[ERROR] all.yaml contains zero Mihomo nodes."
-            exit 1
-          fi
-
-          if [ "$TXT_COUNT" -ne "$YAML_COUNT" ]; then
-            echo "[ERROR] TXT/YAML node count mismatch."
-            exit 1
-          fi
-
-          echo "[OK] output validation passed."
-
-
-      # ======================================================
-      # OUTPUT
-      # ======================================================
-
-      - name: OUTPUT
-        shell: bash
-        run: |
-
-          echo ""
-          echo "========================================"
-          echo "          CF-IP OUTPUT"
-          echo "========================================"
-          echo ""
-
-          echo "生成时间：$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo ""
-
-          # --------------------------------------------------
-          # 历史池统计
-          # --------------------------------------------------
-
-          if [ -f "data/ip_history.json" ]; then
-
-            HISTORY_COUNT=$(
-              python - <<'PY'
-import json
-
-with open(
-    "data/ip_history.json",
-    "r",
-    encoding="utf-8"
-) as f:
-    data = json.load(f)
-
-print(len(data))
-PY
-            )
-
-          else
-
-            HISTORY_COUNT=0
-
-          fi
-
-          echo "历史 IP 池：$HISTORY_COUNT"
-          echo "淘汰规则：连续 3 次健康检查失败"
-          echo "历史池上限：5000"
-          echo ""
-
-
-          # --------------------------------------------------
-          # Base64 TXT 节点统计
-          # --------------------------------------------------
-
-          count_txt_nodes() {
-
-            local file="$1"
-
-            if [ -f "$file" ]; then
-
-              base64 -d "$file" 2>/dev/null \
-                | awk '
-                    /^vless:\/\// {
-                      n++
-                    }
-                    END {
-                      print n+0
-                    }
-                  '
-
-            else
-
-              echo "0"
-
-            fi
-          }
-
-
-          # --------------------------------------------------
-          # YAML 节点统计
-          # --------------------------------------------------
-
-          count_yaml_nodes() {
-
-            local file="$1"
-
-            if [ -f "$file" ]; then
-
-              awk '
-                /^[[:space:]]*-[[:space:]]name:/ {
-                  n++
-                }
-                END {
-                  print n+0
-                }
-              ' "$file"
-
-            else
-
-              echo "0"
-
-            fi
-          }
-
-
-          # --------------------------------------------------
-          # ALL
-          # --------------------------------------------------
-
-          TOTAL_TXT=$(
-            count_txt_nodes \
-              "output/all.txt"
-          )
-
-          TOTAL_YAML=$(
-            count_yaml_nodes \
-              "output/all.yaml"
-          )
-
-
-          echo "最终 VLESS 节点：$TOTAL_TXT"
-          echo "最终 Mihomo 节点：$TOTAL_YAML"
-          echo ""
-
-          echo "----------------------------------------"
-          printf "%-18s %8s %8s\n" \
-            "文件" \
-            "TXT" \
-            "YAML"
-
-          echo "----------------------------------------"
-
-
-          # --------------------------------------------------
-          # 地区统计
-          # --------------------------------------------------
-
-          for region in \
-            hk \
-            jp \
-            sg \
-            kr \
-            tw \
-            us \
-            de \
-            cn \
-            other
-          do
-
-            txt="output/${region}.txt"
-            yaml="output/${region}.yaml"
-
-            if [ -f "$txt" ] || [ -f "$yaml" ]; then
-
-              txt_count=$(
-                count_txt_nodes "$txt"
-              )
-
-              yaml_count=$(
-                count_yaml_nodes "$yaml"
-              )
-
-              printf "%-18s %8s %8s\n" \
-                "${region}.txt" \
-                "$txt_count" \
-                "$yaml_count"
-
-            fi
-
-          done
-
-
-          echo "----------------------------------------"
-
-          printf "%-18s %8s %8s\n" \
-            "ALL" \
-            "$TOTAL_TXT" \
-            "$TOTAL_YAML"
-
-          echo "----------------------------------------"
-          echo ""
-
-          echo "Pages:"
-          echo "https://baidu163msn.github.io/CF-IP/"
-          echo ""
-
-          echo "VLESS TXT:"
-          echo "https://baidu163msn.github.io/CF-IP/all.txt"
-          echo ""
-
-          echo "Mihomo YAML:"
-          echo "https://baidu163msn.github.io/CF-IP/all.yaml"
-          echo ""
-
-          echo "========================================"
-
-
-      # ======================================================
-      # GitHub Actions Summary
-      # ======================================================
-
-      - name: Generate Summary
-        shell: bash
-        run: |
-
-          count_txt_nodes() {
-
-            local file="$1"
-
-            if [ -f "$file" ]; then
-
-              base64 -d "$file" 2>/dev/null \
-                | awk '
-                    /^vless:\/\// {
-                      n++
-                    }
-                    END {
-                      print n+0
-                    }
-                  '
-
-            else
-
-              echo "0"
-
-            fi
-          }
-
-
-          count_yaml_nodes() {
-
-            local file="$1"
-
-            if [ -f "$file" ]; then
-
-              awk '
-                /^[[:space:]]*-[[:space:]]name:/ {
-                  n++
-                }
-                END {
-                  print n+0
-                }
-              ' "$file"
-
-            else
-
-              echo "0"
-
-            fi
-          }
-
-
-          TOTAL_TXT=$(
-            count_txt_nodes \
-              "output/all.txt"
-          )
-
-          TOTAL_YAML=$(
-            count_yaml_nodes \
-              "output/all.yaml"
-          )
-
-
-          if [ -f "data/ip_history.json" ]; then
-
-            HISTORY_COUNT=$(
-              python - <<'PY'
-import json
-
-with open(
-    "data/ip_history.json",
-    "r",
-    encoding="utf-8"
-) as f:
-    data = json.load(f)
-
-print(len(data))
-PY
-            )
-
-          else
-
-            HISTORY_COUNT=0
-
-          fi
-
-
-          {
-            echo "# 🚀 CF-IP 生成结果"
-            echo ""
-
-            echo "**生成时间：**"
-            echo ""
-            echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo ""
-
-            echo "## 📊 节点统计"
-            echo ""
-
-            echo "| 地区 | VLESS TXT | Mihomo YAML |"
-            echo "|:---|---:|---:|"
-
-
-            for region in \
-              hk \
-              jp \
-              sg \
-              kr \
-              tw \
-              us \
-              de \
-              cn \
-              other
-            do
-
-              txt="output/${region}.txt"
-              yaml="output/${region}.yaml"
-
-              if [ -f "$txt" ] || [ -f "$yaml" ]; then
-
-                txt_count=$(
-                  count_txt_nodes "$txt"
-                )
-
-                yaml_count=$(
-                  count_yaml_nodes "$yaml"
-                )
-
-                echo "| ${region} | ${txt_count} | ${yaml_count} |"
-
-              fi
-
-            done
-
-
-            echo ""
-
-            echo "## 🗃️ 历史 IP 池"
-            echo ""
-
-            echo "**${HISTORY_COUNT} 个 IP**"
-            echo ""
-
-            echo "- 当前源 IP 与历史 IP 一起健康检查"
-            echo "- 源站消失但仍健康的 IP 继续保留"
-            echo "- 连续 3 次健康检查失败后淘汰"
-            echo "- 历史池上限：5000"
-
-            echo ""
-
-            echo "## 📦 总计"
-            echo ""
-
-            echo "**${TOTAL_TXT} 个 VLESS 节点**"
-            echo ""
-
-            echo "**${TOTAL_YAML} 个 Mihomo 节点**"
-            echo ""
-
-            echo "## 🌐 GitHub Pages"
-            echo ""
-
-            echo "[打开订阅首页](https://baidu163msn.github.io/CF-IP/)"
-            echo ""
-
-            echo "[打开 VLESS all.txt](https://baidu163msn.github.io/CF-IP/all.txt)"
-            echo ""
-
-            echo "[打开 Mihomo all.yaml](https://baidu163msn.github.io/CF-IP/all.yaml)"
-
-          } >> "$GITHUB_STEP_SUMMARY"
-
-
-      # ======================================================
-      # 提交历史 IP 池
-      #
-      # 关键修复：
-      # 先 git add，再使用 git diff --cached。
-      #
-      # 这样第一次创建 data/ip_history.json
-      # 也可以正常提交。
-      #
-      # data/** 不在 push.paths 中，
-      # 所以历史 commit 不会再次触发本 Workflow。
-      # ======================================================
-
-      - name: Save IP history
-        shell: bash
-        run: |
-
-          set -e
-
-          git config user.name \
-            "github-actions[bot]"
-
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
-
-
-          if [ ! -f "data/ip_history.json" ]; then
-
-            echo "[ERROR] data/ip_history.json was not generated."
-            exit 1
-
-          fi
-
-
-          git add data/ip_history.json
-
-
-          if git diff --cached --quiet; then
-
-            echo "[INFO] IP history unchanged."
-
-          else
-
-            echo "[INFO] Updating IP history..."
-
-            git commit \
-              -m "chore: update IP history"
-
-            git push
-
-          fi
-
-
-      # ======================================================
-      # 上传 GitHub Pages artifact
-      # ======================================================
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: output
-
-
-  # ==========================================================
-  # Deploy
-  # ==========================================================
-
-  deploy:
-
-    needs: generate
-
-    runs-on: ubuntu-latest
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-
-    steps:
-
-      # ------------------------------------------------------
-      # Deploy
-      # ------------------------------------------------------
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-
-
-      # ======================================================
-      # Deployment OUTPUT
-      # ======================================================
-
-      - name: Deployment OUTPUT
-        shell: bash
-        run: |
-
-          echo ""
-          echo "========================================"
-          echo "       CF-IP DEPLOYMENT"
-          echo "========================================"
-          echo ""
-
-          echo "状态：✅ GitHub Pages 部署成功"
-          echo ""
-
-          echo "Pages："
-          echo "${{ steps.deployment.outputs.page_url }}"
-          echo ""
-
-          echo "VLESS TXT："
-          echo "https://baidu163msn.github.io/CF-IP/all.txt"
-          echo ""
-
-          echo "Mihomo YAML："
-          echo "https://baidu163msn.github.io/CF-IP/all.yaml"
-          echo ""
-
-          echo "========================================"
-
-
-          {
-            echo ""
-            echo "# ✅ CF-IP 部署成功"
-            echo ""
-
-            echo "GitHub Pages 已成功部署。"
-            echo ""
-
-            echo "🌐 **Pages：**"
-            echo ""
-
-            echo "[打开 Pages](${{ steps.deployment.outputs.page_url }})"
-            echo ""
-
-            echo "📄 **VLESS：**"
-            echo ""
-
-            echo "[all.txt](https://baidu163msn.github.io/CF-IP/all.txt)"
-            echo ""
-
-            echo "📄 **Mihomo：**"
-            echo ""
-
-            echo "[all.yaml](https://baidu163msn.github.io/CF-IP/all.yaml)"
-
-          } >> "$GITHUB_STEP_SUMMARY"
+generate:
+runs-on: ubuntu-latest
+
+steps:
+
+  - name: Checkout
+    uses: actions/checkout@v4
+
+  - name: Setup Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.12"
+
+  - name: Install dependencies
+    run: |
+      python -m pip install --upgrade pip
+      python -m pip install --disable-pip-version-check -r requirements.txt
+
+  - name: Generate subscriptions
+    run: |
+      python src/generator.py
+
+  - name: Verify output
+    shell: bash
+    run: |
+      set -e
+
+      echo "========================================"
+      echo "CF-IP OUTPUT CHECK"
+      echo "========================================"
+
+      echo ""
+      echo "工作目录："
+      pwd
+
+      echo ""
+      echo "output 目录："
+      ls -lah output || true
+
+      echo ""
+      echo "data 目录："
+      ls -lah data || true
+
+      echo ""
+      echo "========================================"
+
+      if [ ! -d "output" ]; then
+        echo "ERROR: output directory does not exist."
+        exit 1
+      fi
+
+      if [ ! -f "output/all.txt" ]; then
+        echo "ERROR: output/all.txt does not exist."
+        exit 1
+      fi
+
+      if [ ! -f "output/all.yaml" ]; then
+        echo "ERROR: output/all.yaml does not exist."
+        exit 1
+      fi
+
+      echo "output/all.txt: OK"
+      echo "output/all.yaml: OK"
+
+      echo ""
+      echo "========================================"
+
+  - name: Generate statistics
+    shell: bash
+    run: |
+      echo "# 🚀 CF-IP 生成结果" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      echo "**生成时间：** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      count_txt_nodes() {
+        local file="$1"
+
+        if [ -f "$file" ]; then
+          base64 -d "$file" 2>/dev/null |
+            grep -c '^vless://' || true
+        else
+          echo "0"
+        fi
+      }
+
+      count_yaml_nodes() {
+        local file="$1"
+
+        if [ -f "$file" ]; then
+          grep -c '^[[:space:]]*-[[:space:]]*name:' "$file" || true
+        else
+          echo "0"
+        fi
+      }
+
+      TOTAL_TXT=$(count_txt_nodes "output/all.txt")
+      TOTAL_YAML=$(count_yaml_nodes "output/all.yaml")
+
+      if [ -f "data/ip_history.json" ]; then
+        HISTORY_COUNT=$(python - <<'PY'
+      import json
+
+      try:
+          with open("data/ip_history.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          if isinstance(data, dict):
+              print(len(data))
+          elif isinstance(data, list):
+              print(len(data))
+          else:
+              print(0)
+      except Exception:
+          print(0)
+      PY
+        )
+      else
+        HISTORY_COUNT=0
+      fi
+
+      echo "## 📊 节点统计" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+      echo "| 项目 | 数量 |" >> "$GITHUB_STEP_SUMMARY"
+      echo "|:---|---:|" >> "$GITHUB_STEP_SUMMARY"
+      echo "| VLESS TXT | ${TOTAL_TXT} |" >> "$GITHUB_STEP_SUMMARY"
+      echo "| Mihomo YAML | ${TOTAL_YAML} |" >> "$GITHUB_STEP_SUMMARY"
+      echo "| 历史 IP | ${HISTORY_COUNT} |" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      echo "## 🌐 GitHub Pages" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+      echo "[CF-IP 首页](https://baidu163msn.github.io/CF-IP/)" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+      echo "[VLESS all.txt](https://baidu163msn.github.io/CF-IP/all.txt)" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+      echo "[Mihomo all.yaml](https://baidu163msn.github.io/CF-IP/all.yaml)" >> "$GITHUB_STEP_SUMMARY"
+
+      echo ""
+      echo "========================================"
+      echo "VLESS TXT nodes : ${TOTAL_TXT}"
+      echo "Mihomo YAML nodes: ${TOTAL_YAML}"
+      echo "History IP count : ${HISTORY_COUNT}"
+      echo "========================================"
+
+  - name: Save IP history
+    shell: bash
+    run: |
+      git config user.name "github-actions[bot]"
+      git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      if [ ! -f "data/ip_history.json" ]; then
+        echo "[INFO] No IP history file generated."
+        exit 0
+      fi
+
+      if git diff --quiet -- data/ip_history.json; then
+        echo "[INFO] IP history unchanged."
+      else
+        git add data/ip_history.json
+        git commit -m "chore: update IP history"
+        git push
+      fi
+
+  - name: Upload Pages artifact
+    uses: actions/upload-pages-artifact@v3
+    with:
+      path: output
+runs-on: ubuntu-latest
+
+environment:
+  name: github-pages
+  url: ${{ steps.deployment.outputs.page_url }}
+
+steps:
+
+  - name: Deploy to GitHub Pages
+    id: deployment
+    uses: actions/deploy-pages@v4
+
+  - name: Deployment summary
+    shell: bash
+    run: |
+      echo "# ✅ CF-IP 部署成功" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+      echo "GitHub Pages：${{ steps.deployment.outputs.page_url }}" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+      echo "VLESS：https://baidu163msn.github.io/CF-IP/all.txt" >> "$GITHUB_STEP_SUMMARY"
+      echo "" >> "$GITHUB_STEP_SUMMARY"
+      echo "Mihomo：https://baidu163msn.github.io/CF-IP/all.yaml" >> "$GITHUB_STEP_SUMMARY"
