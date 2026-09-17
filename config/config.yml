@@ -1,0 +1,57 @@
+# cf-vless-generator
+# 所有可变参数集中在这里，GitHub Actions / Python 无需修改。
+sources:
+  - name: love_ztm
+    url: https://raw.githubusercontent.com/love-ztm/cfip/refs/heads/main/ubest_ips.txt
+    kind: ip
+  - name: junzhen
+    url: https://cf.junzhen.qzz.io/best_ips.txt
+    kind: ip
+  - name: s5gy
+    url: https://bestcf.pages.dev/s5gy/mini.txt
+    kind: ip
+  - name: tiancheng
+    url: https://bestcf.pages.dev/tiancheng/mini.txt
+    kind: ip
+  - name: domain_asia
+    url: https://bestcf.pages.dev/domain/Domain-Asia.txt
+    kind: domain
+
+template:
+  uuid: "2a2038c5-a62c-4f59-af4f-733426d37193"
+  server_host: "lt.1998.dpdns.org"
+  default_port: 443
+  path: "/vl/d8pzhrVA8I87OAFX4yA?ed=2560"
+  security: "tls"
+  alpn: "http/1.1"
+  encryption: "none"
+  insecure: 0
+  host: "b.0246.us.ci"
+  fp: "chrome"
+  type: "ws"
+  allowInsecure: 0
+  sni: "b.0246.us.ci"
+
+test:
+  enabled: true
+  connect_timeout: 3.0
+  tls_timeout: 4.0
+  concurrency: 40
+  # TLS 测试使用模板中的 SNI；不会执行完整 VLESS 登录。
+  tls_verify: false
+
+output:
+  keep_failed: false
+  include_domain_source: true
+  max_nodes_per_region: 100
+  naming: "{REGION}-{INDEX:03d}"
+  regions:
+    HK: "香港"
+    JP: "日本"
+    SG: "新加坡"
+    KR: "韩国"
+    TW: "台湾"
+    US: "美国"
+    DE: "德国"
+    CN: "中国"
+    OTHER: "其他"

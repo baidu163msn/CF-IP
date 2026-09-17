@@ -1,0 +1,1 @@
+vless://{UUID}@{ADDRESS}:{PORT}?path={PATH}&security={SECURITY}&alpn={ALPN}&encryption={ENCRYPTION}&insecure={INSECURE}&host={HOST}&fp={FP}&type={TYPE}&allowInsecure={ALLOW_INSECURE}&sni={SNI}#{NAME}
