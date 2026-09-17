@@ -5,7 +5,7 @@ on:
   schedule:
     # GitHub Actions 使用 UTC
     # 每小时第 7 分钟执行一次
-    - cron: "7 * * * *"
+    - cron: '14 0,12 * * *'
   push:
     paths:
       - "config/"
