@@ -10,8 +10,6 @@ sources:
 
 template:
   uuid: "2a2038c5-a62c-4f59-af4f-733426d37193"
-  server_host: "lt.1998.dpdns.org"
-  default_port: 443
   path: "/vl/d8pzhrVA8I87OAFX4yA?ed=2560"
   security: "tls"
   alpn: "http/1.1"
@@ -19,7 +17,11 @@ template:
   insecure: 0
   host: "b.0246.us.ci"
   fp: "chrome"
+  # type: ws | grpc（其它值会退化为不带专属参数的通用 VLESS 链接）
   type: "ws"
+  # 仅在 type: grpc 时生效，对应 VLESS 链接里的 serviceName
+  # 以及 Mihomo 的 grpc-opts.grpc-service-name
+  serviceName: ""
   allowInsecure: 0
   sni: "b.0246.us.ci"
 
@@ -28,14 +30,22 @@ test:
   connect_timeout: 3.0
   tls_timeout: 4.0
   concurrency: 40
-  # TLS 测试使用模板中的 SNI；不会执行完整 VLESS 登录。
+  # true：健康检查时按标准 TLS 流程校验证书（对 SNI 域名做正常验证）
+  # false（默认）：只要求 TLS 握手成功，不校验证书——
+  #   适合"借用 Cloudflare 边缘 IP 做 SNI 前置"的场景，
+  #   因为边缘 IP 本身不会持有 sni 对应域名的证书。
   tls_verify: false
 
 output:
+  # true：首页会额外显示"观察中、未连续失败 3 次"的历史 IP 数量
+  #   （仅展示统计数字，这些 IP 不会进入任何订阅文件）
   keep_failed: false
+  # false：即使某个源的 kind 是 domain，也全局跳过域名类候选，
+  #   只保留 IP 类型的节点
   include_domain_source: true
   max_nodes_per_region: 100
   naming: "{REGION}-{INDEX:03d}"
+  # 首页展示用的中文地区名；不影响节点命名/订阅内容
   regions:
     HK: "香港"
     JP: "日本"
