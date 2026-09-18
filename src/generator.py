@@ -652,6 +652,60 @@ def test_candidates(items):
 
         return items
 
+    # ========================================================
+    # test.skip_ipv6_test
+    #
+    # 很多 CI Runner（包括 GitHub 托管的 ubuntu-latest）
+    # 默认没有公网 IPv6 出网能力，导致 IPv6 候选在这里
+    # 100% 测试失败，进而永远无法进入最终订阅。
+    #
+    # 打开这个开关后，IPv6 候选会跳过真实连接测试，
+    # 直接信任源站数据、标记为健康。
+    #
+    # 注意：这样做意味着 IPv6 节点完全没有被验证过，
+    # 如果源站数据本身质量不高，可能会包含失效 IP。
+    # ========================================================
+
+    skip_ipv6 = bool(
+        CFG["test"].get(
+            "skip_ipv6_test",
+            False
+        )
+    )
+
+    if skip_ipv6:
+
+        to_test = []
+        skipped = 0
+
+        for item in items:
+
+            if item.get("type") == "ipv6":
+
+                item["health_ok"] = True
+                item["tls"] = ""
+                item["test_error"] = ""
+                item["tested"] = False
+                item["test_time"] = now
+
+                skipped += 1
+
+            else:
+
+                to_test.append(item)
+
+        if skipped:
+
+            print(
+                f"[INFO] skip_ipv6_test=true: "
+                f"{skipped} IPv6 candidates "
+                f"trusted without testing"
+            )
+
+    else:
+
+        to_test = items
+
     workers = max(
         1,
         int(
@@ -674,7 +728,7 @@ def test_candidates(items):
                 tcp_tls_test,
                 item
             ): item
-            for item in items
+            for item in to_test
         }
 
         for future in concurrent.futures.as_completed(
@@ -714,7 +768,7 @@ def test_candidates(items):
     print(
         f"[HEALTH] passed={passed}, "
         f"failed={failed}, "
-        f"total={len(items)}"
+        f"total={len(to_test)}"
     )
 
     return items
