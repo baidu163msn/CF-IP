@@ -585,8 +585,18 @@ def tcp_tls_test(item):
 
             ctx = ssl.create_default_context()
 
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            # 是否校验证书由 config.yml 的 test.tls_verify 控制
+            # 默认 False：只验证 TLS 握手是否成功（CF 边缘 IP 场景常见做法）
+            verify = bool(
+                CFG["test"].get(
+                    "tls_verify",
+                    False
+                )
+            )
+
+            if not verify:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
 
             with ctx.wrap_socket(
                 sock,
@@ -1003,17 +1013,51 @@ def vless_node(
     if item["type"] == "ipv6":
         address = f"[{address}]"
 
-    params = (
-        f"path={quote(t['path'], safe='')}"
-        f"&security={quote(str(t['security']), safe='')}"
-        f"&alpn={quote(str(t['alpn']), safe='')}"
-        f"&encryption={quote(str(t['encryption']), safe='')}"
-        f"&insecure={t['insecure']}"
-        f"&host={quote(t['host'], safe='')}"
-        f"&fp={quote(t['fp'], safe='')}"
-        f"&type={quote(t['type'], safe='')}"
-        f"&allowInsecure={t['allowInsecure']}"
-        f"&sni={quote(t['sni'], safe='')}"
+    transport_type = str(
+        t.get("type", "")
+    ).lower()
+
+    # ========================================================
+    # 通用参数（与传输方式无关）
+    # ========================================================
+
+    query = {
+        "security": t["security"],
+        "alpn": t["alpn"],
+        "encryption": t["encryption"],
+        "insecure": t["insecure"],
+        "fp": t["fp"],
+        "type": t["type"],
+        "allowInsecure": t["allowInsecure"],
+        "sni": t["sni"],
+    }
+
+    # ========================================================
+    # WebSocket 专属参数
+    # ========================================================
+
+    if transport_type == "ws":
+
+        query["path"] = t["path"]
+        query["host"] = t["host"]
+
+    # ========================================================
+    # gRPC 专属参数
+    #
+    # 注意：与 clash_proxy() 保持一致，不再把 WS 的
+    # path/host 塞进 gRPC 链接里。
+    # ========================================================
+
+    elif transport_type == "grpc":
+
+        query["serviceName"] = t.get(
+            "serviceName",
+            ""
+        )
+
+    params = "&".join(
+        f"{key}={quote(str(value), safe='')}"
+        for key, value in query.items()
     )
 
     return (
@@ -1179,12 +1223,9 @@ def write_clash_yaml(
     proxies = [
         clash_proxy(
             item,
-            index
+            item["_index"]
         )
-        for index, item in enumerate(
-            items,
-            1
-        )
+        for item in items
     ]
 
     data = {
@@ -1206,10 +1247,19 @@ def write_clash_yaml(
 # 生成首页
 # ============================================================
 
-def write_index():
+def write_index(history_stats=None):
 
     files = sorted(
         OUT.glob("*")
+    )
+
+    # 使用 config.yml 的 output.regions 中文对照表美化文件名
+    region_names = CFG.get(
+        "output",
+        {}
+    ).get(
+        "regions",
+        {}
     )
 
     links = []
@@ -1221,13 +1271,48 @@ def write_index():
             ".yaml"
         ):
 
+            code = p.stem.upper()
+
+            label = p.name
+
+            if code in region_names:
+
+                label = (
+                    f"{p.name}"
+                    f"（{region_names[code]}）"
+                )
+
             links.append(
                 f"<li>"
                 f"<a href='{p.name}'>"
-                f"{p.name}"
+                f"{label}"
                 f"</a>"
                 f"</li>"
             )
+
+    # ========================================================
+    # output.keep_failed
+    #
+    # 打开后，在首页额外展示"仍在观察中、未连续失败 3 次"的
+    # 历史 IP 数量，仅供参考——这些 IP 不会进入任何订阅文件。
+    # ========================================================
+
+    extra_html = ""
+
+    if CFG.get("output", {}).get(
+        "keep_failed",
+        False
+    ) and history_stats:
+
+        retained = history_stats.get(
+            "retained_failed",
+            0
+        )
+
+        extra_html = (
+            "<p>观察中（未连续失败 3 次）的历史 IP："
+            f"{retained} 个，未包含在订阅内。</p>"
+        )
 
     html = (
         "<!DOCTYPE html>"
@@ -1243,7 +1328,8 @@ def write_index():
         "<ul>"
         + "".join(links)
         + "</ul>"
-        "</body>"
+        + extra_html
+        + "</body>"
         "</html>"
     )
 
@@ -1331,6 +1417,35 @@ def main():
     # ========================================================
 
     current_items, source_status = parse_sources()
+
+    # ========================================================
+    # output.include_domain_source
+    #
+    # 全局开关：即使某个源以 kind: domain 提供候选，
+    # 也可以在这里一键关闭域名类候选的使用。
+    # ========================================================
+
+    if not CFG.get("output", {}).get(
+        "include_domain_source",
+        True
+    ):
+
+        before = len(current_items)
+
+        current_items = [
+            item
+            for item in current_items
+            if item["type"] != "domain"
+        ]
+
+        removed = before - len(current_items)
+
+        if removed:
+
+            print(
+                f"[INFO] include_domain_source=false: "
+                f"dropped {removed} domain candidates"
+            )
 
     # ========================================================
     # 源站状态统计
@@ -1604,6 +1719,20 @@ def main():
         if not items:
             continue
 
+        # ----------------------------------------------------
+        # 固定编号
+        #
+        # 这里给每个节点定下唯一的编号，后面 all.txt / all.yaml
+        # 复用同一个编号，避免同一节点在分地区文件和汇总文件里
+        # 显示成两个不同的名字。
+        # ----------------------------------------------------
+
+        for index, item in enumerate(
+            items,
+            1
+        ):
+            item["_index"] = index
+
         # 保存最终选中的 IP
         all_items.extend(
             items
@@ -1616,12 +1745,9 @@ def main():
         nodes = [
             vless_node(
                 item,
-                index
+                item["_index"]
             )
-            for index, item in enumerate(
-                items,
-                1
-            )
+            for item in items
         ]
 
         region_name = region.lower()
@@ -1653,12 +1779,9 @@ def main():
     all_nodes = [
         vless_node(
             item,
-            index
+            item["_index"]
         )
-        for index, item in enumerate(
-            all_items,
-            1
-        )
+        for item in all_items
     ]
 
     if not all_nodes:
@@ -1683,7 +1806,7 @@ def main():
     # 生成首页
     # ========================================================
 
-    write_index()
+    write_index(history_stats)
 
     # ========================================================
     # 最终统计
