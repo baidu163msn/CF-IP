@@ -4,14 +4,16 @@ on:
   workflow_dispatch:
   schedule:
     # GitHub Actions 使用 UTC
-    # 每小时第 7 分钟执行一次
+    # 每天 UTC 00:14 与 12:14 各执行一次（北京时间 08:14 / 20:14）
     - cron: '14 0,12 * * *'
   push:
     paths:
-      - "config/"
-      - "templates/"
-      - "src/"
-      - ".github/workflows/"
+      # 注意：必须带 ** 才能匹配目录下的所有文件，
+      # 光写 "config/" 这种没有通配符的写法永远不会命中任何改动。
+      - "config/**"
+      - "templates/**"
+      - "src/**"
+      - ".github/workflows/**"
       - "requirements.txt"
 
 # ============================================================
