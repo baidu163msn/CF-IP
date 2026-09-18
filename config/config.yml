@@ -1,11 +1,11 @@
 # cf-vless-generator
 # 所有可变参数集中在这里，GitHub Actions / Python 无需修改。
 sources:
-  - name: LZ
-    url: https://raw.githubusercontent.com/love-ztm/cfip/refs/heads/main/ubest_ips.txt
+  - name: YD-V4
+    url: https://raw.githubusercontent.com/svip-s/cloudflare_ip/refs/heads/main/best_ips.txt
     kind: ip
-  - name: MJZ
-    url: https://cf.junzhen.qzz.io/best_ips.txt
+  - name: YD-V6
+    url: https://bestcf.pages.dev/vvhan/ipv6.txt
     kind: ip
 
 template:
@@ -35,6 +35,11 @@ test:
   #   适合"借用 Cloudflare 边缘 IP 做 SNI 前置"的场景，
   #   因为边缘 IP 本身不会持有 sni 对应域名的证书。
   tls_verify: false
+  # GitHub 托管 Runner（ubuntu-latest）默认没有公网 IPv6 出网能力，
+  # 会导致所有 IPv6 候选在健康检查阶段必然失败、永远进不了订阅。
+  # 打开这项后，IPv6 候选跳过真实连接测试，直接信任源站数据。
+  # 注意：这意味着 IPv6 节点完全没有被验证过是否存活。
+  skip_ipv6_test: true
 
 output:
   # true：首页会额外显示"观察中、未连续失败 3 次"的历史 IP 数量
