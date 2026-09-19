@@ -49,7 +49,7 @@ output:
   #   只保留 IP 类型的节点
   include_domain_source: true
   max_nodes_per_region: 100
-  naming: "{REGION}-{INDEX:03d}"
+  naming: "{REGION}-{INDEX:02d}"
   # 首页展示用的中文地区名；不影响节点命名/订阅内容
   regions:
     HK: "香港"
