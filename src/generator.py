@@ -1,9 +1,7 @@
-import base64
 import concurrent.futures
 import datetime
 import ipaddress
 import json
-import os
 import re
 import socket
 import ssl
@@ -22,17 +20,6 @@ import yaml
 SRC_DIR = Path(__file__).resolve().parent
 ROOT = SRC_DIR.parent
 
-# 实际仓库结构：
-#
-# CF-IP/
-# ├── config/
-# │   └── config.yml
-# ├── data/
-# │   └── ip_history.json
-# ├── output/
-# └── src/
-#     └── generator.py
-#
 CONFIG_FILE = ROOT / "config" / "config.yml"
 HISTORY_FILE = ROOT / "data" / "ip_history.json"
 OUT = ROOT / "output"
@@ -43,47 +30,29 @@ OUT = ROOT / "output"
 # ============================================================
 
 if not CONFIG_FILE.exists():
-    raise FileNotFoundError(
-        f"Config file not found: {CONFIG_FILE}"
-    )
+    raise FileNotFoundError(f"Config file not found: {CONFIG_FILE}")
 
 with CONFIG_FILE.open("r", encoding="utf-8") as f:
     CFG = yaml.safe_load(f) or {}
 
+SOURCE_CFG = CFG.get("sources", [])
+TEMPLATE_CFG = CFG.get("template", {})
+TEST_CFG = CFG.get("test", {})
+OUTPUT_CFG = CFG.get("output", {})
 
-MAX_FAILURES = int(
-    CFG.get("history", {}).get(
-        "max_failures",
-        3,
-    )
-)
+MAX_FAILURES = 3
+MAX_HISTORY = 1000
 
-MAX_HISTORY = int(
-    CFG.get("history", {}).get(
-        "max_history",
-        5000,
-    )
-)
+HISTORY_CFG = CFG.get("history", {})
+if isinstance(HISTORY_CFG, dict):
+    MAX_FAILURES = int(HISTORY_CFG.get("max_failures", MAX_FAILURES))
+    MAX_HISTORY = int(HISTORY_CFG.get("max_history", MAX_HISTORY))
 
 
 # ============================================================
-# Region / Carrier definitions
+# Carrier / Region
 # ============================================================
 
-REGION_RE = re.compile(
-    r"(?<![A-Za-z0-9])"
-    r"(HK|JP|SG|KR|TW|US|DE|CN)"
-    r"(?![A-Za-z0-9])",
-    re.I,
-)
-
-
-# 中国运营商
-#
-# 优先识别运营商。
-# 这样即使注释中同时出现“中国”和“移动”，
-# 也会优先归类为 CMCC。
-#
 CARRIER_ALIASES = {
     "联通": "CU",
     "中国联通": "CU",
@@ -97,7 +66,6 @@ CARRIER_ALIASES = {
     "中国移动": "CMCC",
     "China Mobile": "CMCC",
 }
-
 
 REGION_ALIASES = {
     "香港": "HK",
@@ -128,140 +96,75 @@ REGION_ALIASES = {
 }
 
 
-DEFAULT_REGION_NAMES = {
-    "HK": "香港",
-    "JP": "日本",
-    "SG": "新加坡",
-    "KR": "韩国",
-    "TW": "台湾",
-    "US": "美国",
-    "DE": "德国",
-    "CN": "中国",
+REGION_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(HK|JP|SG|KR|TW|US|DE|CN)"
+    r"(?![A-Za-z0-9])",
+    re.I,
+)
 
-    "CU": "联通",
-    "CT": "电信",
-    "CMCC": "移动",
-
-    "OTHER": "其他",
-}
-
-
-# ============================================================
-# IP:PORT parser
-# ============================================================
 
 IP_PORT_RE = re.compile(
     r"^\s*"
-    r"(\[[0-9a-fA-F:]+\]|[^:\s#]+)"
-    r"\s*:\s*"
-    r"(\d{1,5})"
-    r"\s*(?:#(.*))?$"
+    r"(?:"
+    r"\[([0-9A-Fa-f:.]+)\]"
+    r"|"
+    r"([0-9A-Fa-f:.]+)"
+    r"|"
+    r"([A-Za-z0-9.-]+)"
+    r")"
+    r":(\d+)"
+    r"(?:#(.*))?"
+    r"\s*$"
 )
 
 
 # ============================================================
-# Time
+# Utility
 # ============================================================
 
-def utc_now():
-    return datetime.datetime.now(
-        datetime.timezone.utc
-    ).isoformat()
-
-
-# ============================================================
-# Carrier detection
-# ============================================================
-
-def carrier_from_comment(comment):
+def detect_carrier(comment):
     """
-    根据注释判断中国运营商。
+    Carrier detection has priority over region detection.
 
-    优先级：
-        联通 -> CU
-        电信 -> CT
-        移动 -> CMCC
-
-    只识别明确的运营商名称，
-    避免普通单词 mobile / telecom / unicom 产生误判。
+    Important:
+    Do not independently match generic words such as
+    mobile / telecom / unicom because they may create false
+    positives.
     """
+    text = str(comment or "")
 
-    if not comment:
-        return None
-
-    text = str(comment)
-
-    for alias, code in CARRIER_ALIASES.items():
+    for alias, carrier in CARRIER_ALIASES.items():
         if alias.lower() in text.lower():
-            return code
+            return carrier
 
     return None
 
 
-# ============================================================
-# Region detection
-# ============================================================
+def detect_region(comment):
+    text = str(comment or "")
 
-def region_from_comment(comment, source_name=""):
-    """
-    根据注释判断节点所属分组。
-
-    优先级：
-        1. 中国运营商
-        2. 地区代码
-        3. 地区中文 / 英文名称
-        4. OTHER
-    """
-
-    comment = comment or ""
-    source_name = source_name or ""
-
-    text = f"{comment} {source_name}"
-
-    # --------------------------------------------------------
-    # 1. 中国运营商
-    # --------------------------------------------------------
-
-    carrier = carrier_from_comment(text)
-
+    # Carrier first
+    carrier = detect_carrier(text)
     if carrier:
         return carrier
 
-    # --------------------------------------------------------
-    # 2. 地区代码
-    # --------------------------------------------------------
-
-    m = REGION_RE.search(text)
-
-    if m:
-        return m.group(1).upper()
-
-    # --------------------------------------------------------
-    # 3. 地区名称
-    # --------------------------------------------------------
-
-    lower_text = text.lower()
-
-    aliases = sorted(
+    # Long aliases first
+    for alias, region in sorted(
         REGION_ALIASES.items(),
         key=lambda x: len(x[0]),
         reverse=True,
-    )
+    ):
+        if alias.lower() in text.lower():
+            return region
 
-    for alias, code in aliases:
-        if alias.lower() in lower_text:
-            return code
-
-    # --------------------------------------------------------
-    # 4. OTHER
-    # --------------------------------------------------------
+    # Short region code
+    m = REGION_RE.search(text)
+    if m:
+        return m.group(1).upper()
 
     return "OTHER"
 
-
-# ============================================================
-# Address normalization
-# ============================================================
 
 def normalize_address(address):
     address = str(address).strip()
@@ -271,260 +174,154 @@ def normalize_address(address):
 
     try:
         ip = ipaddress.ip_address(address)
-
-        if ip.version == 6:
-            return str(ip), "ipv6"
-
-        return str(ip), "ipv4"
-
+        if ip.version == 4:
+            return str(ip), "ipv4"
+        return str(ip), "ipv6"
     except ValueError:
         return address, "domain"
 
 
-# ============================================================
-# Item key
-# ============================================================
-
 def item_key(item):
     """
-    生成节点唯一键。
+    Carrier-aware deduplication.
 
-    普通节点：
-        address:port
+    CMCC/CU/CT are allowed to share the same IP:port because
+    the same IP can appear in multiple source comments with
+    different carrier labels.
 
-    CMCC/CU/CT：
-        address:port:region
-
-    因此同一个 IP:PORT 可以同时存在于：
-        CU
-        CT
-        CMCC
-
-    例如：
-
-        2606:4700:54::8422:962c:443:CU
-        2606:4700:54::8422:962c:443:CT
+    Other regions keep the traditional address:port key.
     """
+    address = str(item.get("address", ""))
+    port = int(item.get("port", 443))
+    region = str(item.get("region", "OTHER")).upper()
 
-    address = str(
-        item.get("address", "")
-    )
-
-    port = int(
-        item.get("port", 443)
-    )
-
-    region = str(
-        item.get(
-            "region",
-            "OTHER",
-        )
-    ).upper()
-
-    if region in (
-        "CMCC",
-        "CU",
-        "CT",
-    ):
+    if region in ("CMCC", "CU", "CT"):
         return f"{address}:{port}:{region}"
 
     return f"{address}:{port}"
 
 
 # ============================================================
-# Parse line
+# Parse source
 # ============================================================
 
-def parse_line(
-    line,
-    source_name="",
-    kind="ip",
-):
-    """
-    解析：
-
-    1.2.3.4:443#comment
-
-    [2606:4700::1]:443#comment
-    """
+def parse_line(line, source):
+    line = line.strip()
 
     if not line:
-        return None
-
-    line = str(line).strip()
-
-    if not line:
-        return None
-
-    if line.startswith("#"):
         return None
 
     m = IP_PORT_RE.match(line)
-
     if not m:
         return None
 
-    raw_address = m.group(1)
-    raw_port = m.group(2)
-    comment = m.group(3) or ""
+    ipv6_addr = m.group(1)
+    normal_addr = m.group(2)
+    domain_addr = m.group(3)
+    port = int(m.group(4))
+    comment = m.group(5) or ""
 
-    try:
-        port = int(raw_port)
-    except ValueError:
+    raw_address = ipv6_addr or normal_addr or domain_addr
+
+    address, ip_type = normalize_address(raw_address)
+
+    kind = str(source.get("kind", "ip")).lower()
+
+    if kind == "ip" and ip_type == "domain":
         return None
 
-    if port < 1 or port > 65535:
+    if kind == "domain" and ip_type != "domain":
         return None
 
-    address, ip_type = normalize_address(
-        raw_address
-    )
-
-    if kind == "ipv4" and ip_type != "ipv4":
-        return None
-
-    if kind == "ipv6" and ip_type != "ipv6":
-        return None
-
-    region = region_from_comment(
-        comment,
-        source_name,
-    )
+    region = detect_region(comment)
 
     return {
         "address": address,
         "port": port,
         "region": region,
         "comment": comment,
-        "source": source_name,
+        "source": source.get("name", "UNKNOWN"),
         "type": ip_type,
     }
 
 
-# ============================================================
-# Fetch source
-# ============================================================
+def fetch_source(source):
+    name = source.get("name", "UNKNOWN")
+    url = source.get("url", "")
 
-def fetch_source(url, timeout=30):
     req = Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 CF-IP-Generator",
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/130.0 Safari/537.36"
+            )
         },
     )
 
-    with urlopen(
-        req,
-        timeout=timeout,
-    ) as response:
-
+    with urlopen(req, timeout=20) as response:
         data = response.read()
 
-    return data.decode(
-        "utf-8",
-        errors="ignore",
-    )
+    text = data.decode("utf-8", errors="ignore")
 
+    result = []
+    seen = set()
 
-# ============================================================
-# Parse sources
-# ============================================================
+    for line in text.splitlines():
+        item = parse_line(line, source)
 
-def parse_sources():
-    sources = CFG.get(
-        "sources",
-        [],
-    )
-
-    all_items = []
-    source_status = []
-
-    for source in sources:
-
-        name = str(
-            source.get(
-                "name",
-                "UNKNOWN",
-            )
-        )
-
-        url = str(
-            source.get(
-                "url",
-                "",
-            )
-        )
-
-        kind = str(
-            source.get(
-                "kind",
-                "ip",
-            )
-        ).lower()
-
-        try:
-
-            content = fetch_source(url)
-
-            items = []
-
-            for line in content.splitlines():
-
-                item = parse_line(
-                    line,
-                    source_name=name,
-                    kind=kind,
-                )
-
-                if item:
-                    items.append(item)
-
-            source_status.append({
-                "name": name,
-                "url": url,
-                "ok": True,
-                "count": len(items),
-            })
-
-            all_items.extend(items)
-
-            print(
-                f"[SOURCE] {name}: "
-                f"{len(items)} nodes"
-            )
-
-        except Exception as e:
-
-            source_status.append({
-                "name": name,
-                "url": url,
-                "ok": False,
-                "count": 0,
-                "error": str(e),
-            })
-
-            print(
-                f"[SOURCE] {name}: "
-                f"FAILED - {e}"
-            )
-
-    # --------------------------------------------------------
-    # Deduplication
-    # --------------------------------------------------------
-
-    unique = {}
-
-    for item in all_items:
+        if not item:
+            continue
 
         key = item_key(item)
 
-        if key not in unique:
-            unique[key] = item
+        if key in seen:
+            continue
 
-    return (
-        list(unique.values()),
-        source_status,
-    )
+        seen.add(key)
+        result.append(item)
+
+    return result
+
+
+def parse_sources():
+    all_items = []
+    source_status = []
+
+    for source in SOURCE_CFG:
+        name = source.get("name", "UNKNOWN")
+
+        try:
+            items = fetch_source(source)
+            all_items.extend(items)
+
+            source_status.append((name, True, len(items)))
+
+            print(f"[SOURCE] {name}: {len(items)} nodes")
+
+        except Exception as e:
+            source_status.append((name, False, 0))
+
+            print(f"[SOURCE] {name}: ERROR: {e}")
+
+    print("[SOURCE STATUS]")
+
+    for name, ok, count in source_status:
+        if ok:
+            print(f"  OK   {name}: {count}")
+        else:
+            print(f"  FAIL {name}")
+
+    # Global dedup
+    unique = {}
+
+    for item in all_items:
+        unique[item_key(item)] = item
+
+    return list(unique.values()), source_status
 
 
 # ============================================================
@@ -532,219 +329,107 @@ def parse_sources():
 # ============================================================
 
 def load_history():
-
     if not HISTORY_FILE.exists():
         return {}
 
     try:
+        with HISTORY_FILE.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
 
-        with HISTORY_FILE.open(
-            "r",
-            encoding="utf-8",
-        ) as f:
+        if not isinstance(raw, dict):
+            return {}
 
-            data = json.load(f)
+        history = {}
 
-    except Exception:
+        for _, item in raw.items():
+            if not isinstance(item, dict):
+                continue
+
+            key = item_key(item)
+            history[key] = item
+
+        print(f"[HISTORY] loaded: {len(history)}")
+
+        return history
+
+    except Exception as e:
+        print(f"[HISTORY] load error: {e}")
         return {}
 
-    if not isinstance(data, dict):
-        return {}
 
-    result = {}
+def save_history(history):
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    for _, item in data.items():
-
-        if not isinstance(item, dict):
-            continue
-
-        if not item.get("address"):
-            continue
-
-        try:
-
-            item["port"] = int(
-                item.get(
-                    "port",
-                    443,
-                )
-            )
-
-        except Exception:
-            continue
-
-        item["region"] = str(
-            item.get(
-                "region",
-                "OTHER",
-            )
-        ).upper()
-
-        item.setdefault(
-            "comment",
-            "",
+    with HISTORY_FILE.open("w", encoding="utf-8") as f:
+        json.dump(
+            history,
+            f,
+            ensure_ascii=False,
+            indent=2,
         )
 
-        item.setdefault(
-            "source",
-            "",
-        )
 
-        item.setdefault(
-            "type",
-            "ipv4",
-        )
-
-        item.setdefault(
-            "failures",
-            0,
-        )
-
-        item.setdefault(
-            "last_seen",
-            "",
-        )
-
-        item.setdefault(
-            "last_test",
-            "",
-        )
-
-        item.setdefault(
-            "healthy",
-            False,
-        )
-
-        key = item_key(item)
-
-        if key not in result:
-
-            result[key] = item
-
-        else:
-
-            old = result[key]
-
-            old_score = (
-                int(
-                    old.get(
-                        "healthy",
-                        False,
-                    )
-                ),
-                -int(
-                    old.get(
-                        "failures",
-                        0,
-                    )
-                ),
-            )
-
-            new_score = (
-                int(
-                    item.get(
-                        "healthy",
-                        False,
-                    )
-                ),
-                -int(
-                    item.get(
-                        "failures",
-                        0,
-                    )
-                ),
-            )
-
-            if new_score > old_score:
-                result[key] = item
-
-    return result
-
-
-# ============================================================
-# Merge candidates
-# ============================================================
-
-def merge_candidates(
-    history,
-    current,
-):
-
-    merged = {}
-
-    for key, item in history.items():
-        merged[key] = item
+def merge_candidates(current, history):
+    merged = dict(history)
 
     for item in current:
-
         key = item_key(item)
 
-        if key in merged:
+        old = merged.get(key)
 
-            old = merged[key]
-
-            item["failures"] = old.get(
-                "failures",
-                0,
-            )
-
-            item["healthy"] = old.get(
-                "healthy",
-                False,
-            )
-
-            item["last_test"] = old.get(
-                "last_test",
-                "",
-            )
+        if old:
+            item["failures"] = int(old.get("failures", 0))
+            item["last_seen"] = old.get("last_seen")
 
         merged[key] = item
 
-    return list(
-        merged.values()
+    print(f"[MERGE] candidates: {len(merged)}")
+
+    return merged
+
+
+# ============================================================
+# Health check
+# ============================================================
+
+def tcp_tls_test(item):
+    address = item["address"]
+    port = int(item.get("port", 443))
+
+    connect_timeout = float(
+        TEST_CFG.get("connect_timeout", 3.0)
     )
 
+    tls_timeout = float(
+        TEST_CFG.get("tls_timeout", 4.0)
+    )
 
-# ============================================================
-# TCP / TLS test
-# ============================================================
+    tls_verify = bool(
+        TEST_CFG.get("tls_verify", False)
+    )
 
-def tcp_tls_test(
-    address,
-    port,
-    timeout=5,
-    server_hostname=None,
-    skip_cert_verify=True,
-):
-
-    context = ssl.create_default_context()
-
-    if skip_cert_verify:
-
-        context.check_hostname = False
-
-        context.verify_mode = (
-            ssl.CERT_NONE
-        )
+    sni = TEMPLATE_CFG.get("sni", "")
 
     sock = None
 
     try:
-
         sock = socket.create_connection(
-            (
-                address,
-                port,
-            ),
-            timeout=timeout,
+            (address, port),
+            timeout=connect_timeout,
         )
 
-        tls_sock = context.wrap_socket(
+        sock.settimeout(tls_timeout)
+
+        if tls_verify:
+            context = ssl.create_default_context()
+        else:
+            context = ssl._create_unverified_context()
+
+        with context.wrap_socket(
             sock,
-            server_hostname=server_hostname,
-        )
-
-        tls_sock.close()
+            server_hostname=sni or None,
+        ):
+            pass
 
         return True
 
@@ -752,592 +437,311 @@ def tcp_tls_test(
         return False
 
     finally:
-
-        if sock is not None:
-
+        if sock:
             try:
                 sock.close()
             except Exception:
                 pass
 
 
-# ============================================================
-# Test candidates
-# ============================================================
+def test_candidates(candidates):
+    if not TEST_CFG.get("enabled", True):
+        print("[TEST] disabled")
 
-def test_candidates(items):
+        for item in candidates:
+            item["_healthy"] = True
 
-    health_cfg = CFG.get(
-        "health_check",
-        {},
-    )
-
-    enabled = bool(
-        health_cfg.get(
-            "enabled",
-            True,
-        )
-    )
-
-    timeout = int(
-        health_cfg.get(
-            "timeout",
-            5,
-        )
-    )
-
-    workers = int(
-        health_cfg.get(
-            "workers",
-            32,
-        )
-    )
+        return
 
     skip_ipv6_test = bool(
-        health_cfg.get(
-            "skip_ipv6_test",
-            False,
-        )
+        TEST_CFG.get("skip_ipv6_test", False)
     )
 
-    if not enabled:
-
-        for item in items:
-
-            item["healthy"] = True
-            item["last_test"] = utc_now()
-
-        return items
-
-    output_cfg = CFG.get(
-        "output",
-        {},
+    concurrency = int(
+        TEST_CFG.get("concurrency", 40)
     )
 
-    sni = output_cfg.get(
-        "sni",
-        "",
-    )
-
-    skip_cert_verify = bool(
-        output_cfg.get(
-            "skip_cert_verify",
-            True,
-        )
-    )
-
-    def test_one(item):
-
+    def check(item):
         if (
             item.get("type") == "ipv6"
             and skip_ipv6_test
         ):
             return True
 
-        return tcp_tls_test(
-            item["address"],
-            int(item["port"]),
-            timeout=timeout,
-            server_hostname=sni or None,
-            skip_cert_verify=skip_cert_verify,
-        )
+        return tcp_tls_test(item)
 
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=workers
+        max_workers=concurrency
     ) as executor:
 
         futures = {
-            executor.submit(
-                test_one,
-                item,
-            ): item
-            for item in items
+            executor.submit(check, item): item
+            for item in candidates.values()
         }
 
-        for future in concurrent.futures.as_completed(
-            futures
-        ):
-
+        for future in concurrent.futures.as_completed(futures):
             item = futures[future]
 
             try:
-                healthy = bool(
+                item["_healthy"] = bool(
                     future.result()
                 )
             except Exception:
-                healthy = False
-
-            item["healthy"] = healthy
-            item["last_test"] = utc_now()
-
-    return items
+                item["_healthy"] = False
 
 
-# ============================================================
-# Update history
-# ============================================================
-
-def update_history(
-    history,
-    items,
-):
-
-    now = utc_now()
+def update_history(history):
+    now = datetime.datetime.now(
+        datetime.timezone.utc
+    ).isoformat()
 
     updated = {}
 
-    for item in items:
+    for key, item in history.items():
+        healthy = bool(item.get("_healthy", False))
 
-        key = item_key(item)
+        if healthy:
+            item["failures"] = 0
+            item["last_seen"] = now
 
-        old = history.get(
-            key,
-            {},
-        )
-
-        failures = int(
-            old.get(
-                "failures",
-                0,
-            )
-        )
-
-        if item.get("healthy"):
-            failures = 0
         else:
-            failures += 1
+            item["failures"] = (
+                int(item.get("failures", 0)) + 1
+            )
 
-        item["failures"] = failures
-        item["last_seen"] = now
+        item.pop("_healthy", None)
 
-        if failures >= MAX_FAILURES:
-            continue
-
-        updated[key] = item
+        if item["failures"] < MAX_FAILURES:
+            updated[key] = item
 
     return updated
 
 
-# ============================================================
-# History sorting
-# ============================================================
-
-def history_sort_key(item):
-
-    return (
-        -int(
-            item.get(
-                "healthy",
-                False,
-            )
-        ),
-        int(
-            item.get(
-                "failures",
-                0,
-            )
-        ),
-        str(
-            item.get(
-                "address",
-                "",
-            )
-        ),
-        int(
-            item.get(
-                "port",
-                443,
-            )
-        ),
-    )
-
-
-# ============================================================
-# Limit history
-# ============================================================
-
 def limit_history(history):
+    if len(history) <= MAX_HISTORY:
+        return history
 
-    items = list(
-        history.values()
-    )
+    items = list(history.items())
 
     items.sort(
-        key=history_sort_key
+        key=lambda kv: kv[1].get("last_seen", ""),
+        reverse=True,
     )
 
-    return {
-        item_key(item): item
-        for item in items[
-            :MAX_HISTORY
-        ]
-    }
+    return dict(items[:MAX_HISTORY])
 
 
 # ============================================================
-# VLESS node
+# VLESS
 # ============================================================
 
-def vless_node(
-    item,
-    index=None,
-):
-
-    region = str(
-        item.get(
-            "region",
-            "OTHER",
+def template_uuid():
+    return str(
+        TEMPLATE_CFG.get(
+            "uuid",
+            "",
         )
+    )
+
+
+def vless_node(item, index):
+    region = str(
+        item.get("region", "OTHER")
     ).upper()
 
-    if index is None:
-        index = item.get(
-            "_index",
-            1,
-        )
-
-    naming = CFG.get(
-        "output",
-        {}
-    ).get(
+    naming = OUTPUT_CFG.get(
         "naming",
         "{REGION}-{INDEX:03d}",
     )
 
-    try:
+    name = naming.format(
+        REGION=region,
+        INDEX=index,
+    )
 
-        name = naming.format(
-            REGION=region,
-            INDEX=int(index),
-        )
-
-    except Exception:
-
-        name = (
-            f"{region}-"
-            f"{int(index):03d}"
-        )
+    uuid = template_uuid()
 
     address = item["address"]
-    port = int(item["port"])
+    port = int(item.get("port", 443))
 
-    if ":" in address:
-        server = f"[{address}]"
-    else:
-        server = address
-
-    params = []
-
-    params.append(
-        "encryption=none"
+    path = TEMPLATE_CFG.get(
+        "path",
+        "/",
     )
 
-    params.append(
-        "security=tls"
+    security = TEMPLATE_CFG.get(
+        "security",
+        "tls",
     )
 
-    output_cfg = CFG.get(
-        "output",
-        {},
+    encryption = TEMPLATE_CFG.get(
+        "encryption",
+        "none",
     )
 
-    sni = output_cfg.get(
-        "sni",
-        "",
-    )
+    params = {
+        "encryption": encryption,
+        "security": security,
+    }
+
+    sni = TEMPLATE_CFG.get("sni", "")
+    fp = TEMPLATE_CFG.get("fp", "")
 
     if sni:
+        params["sni"] = sni
 
-        params.append(
-            f"sni={quote(str(sni))}"
-        )
+    if fp:
+        params["fp"] = fp
 
-    fingerprint = output_cfg.get(
-        "client_fingerprint",
-        "",
-    )
+    host = TEMPLATE_CFG.get("host", "")
 
-    if fingerprint:
-
-        params.append(
-            f"fp={quote(str(fingerprint))}"
-        )
-
-    if output_cfg.get(
-        "skip_cert_verify",
-        False,
-    ):
-
-        params.append(
-            "allowInsecure=1"
-        )
-
-    transport = str(
-        output_cfg.get(
-            "transport",
-            "ws",
-        )
+    node_type = str(
+        TEMPLATE_CFG.get("type", "ws")
     ).lower()
 
-    if transport == "ws":
+    if node_type == "ws":
+        params["type"] = "ws"
+        params["host"] = host
+        params["path"] = path
 
-        ws_path = output_cfg.get(
-            "ws_path",
-            "/",
-        )
+    elif node_type == "grpc":
+        params["type"] = "grpc"
 
-        ws_host = output_cfg.get(
-            "ws_host",
+        service_name = TEMPLATE_CFG.get(
+            "serviceName",
             "",
-        )
-
-        params.append(
-            "type=ws"
-        )
-
-        params.append(
-            "path="
-            + quote(
-                str(ws_path),
-                safe="/",
-            )
-        )
-
-        if ws_host:
-
-            params.append(
-                "host="
-                + quote(
-                    str(ws_host)
-                )
-            )
-
-    elif transport == "grpc":
-
-        service_name = output_cfg.get(
-            "grpc_service_name",
-            "",
-        )
-
-        params.append(
-            "type=grpc"
         )
 
         if service_name:
+            params["serviceName"] = service_name
 
-            params.append(
-                "serviceName="
-                + quote(
-                    str(service_name)
-                )
-            )
-
-    query = "&".join(params)
+    query = "&".join(
+        f"{quote(str(k))}={quote(str(v))}"
+        for k, v in params.items()
+        if v != ""
+    )
 
     return (
-        f"vless://"
-        f"{item['uuid']}@"
-        f"{server}:"
-        f"{port}"
+        f"vless://{uuid}@"
+        f"{address}:{port}"
         f"?{query}"
         f"#{quote(name)}"
     )
 
 
 # ============================================================
-# Write subscription
+# Mihomo / Clash
 # ============================================================
 
-def write_subscription(
-    path,
-    nodes,
-):
-
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    text = "\n".join(nodes)
-
-    path.write_text(
-        text + (
-            "\n"
-            if text
-            else ""
-        ),
-        encoding="utf-8",
-    )
-
-
-# ============================================================
-# Clash proxy
-# ============================================================
-
-def clash_proxy(
-    item,
-    index=None,
-):
-
+def clash_proxy(item, index):
     region = str(
-        item.get(
-            "region",
-            "OTHER",
-        )
+        item.get("region", "OTHER")
     ).upper()
 
-    if index is None:
-        index = item.get(
-            "_index",
-            1,
-        )
-
-    naming = CFG.get(
-        "output",
-        {}
-    ).get(
+    naming = OUTPUT_CFG.get(
         "naming",
         "{REGION}-{INDEX:03d}",
     )
 
-    try:
-
-        name = naming.format(
-            REGION=region,
-            INDEX=int(index),
-        )
-
-    except Exception:
-
-        name = (
-            f"{region}-"
-            f"{int(index):03d}"
-        )
+    name = naming.format(
+        REGION=region,
+        INDEX=index,
+    )
 
     proxy = {
         "name": name,
         "type": "vless",
         "server": item["address"],
-        "port": int(item["port"]),
-        "uuid": item["uuid"],
+        "port": int(item.get("port", 443)),
+        "uuid": template_uuid(),
         "udp": True,
-        "tls": True,
     }
 
-    output_cfg = CFG.get(
-        "output",
-        {},
+    security = TEMPLATE_CFG.get(
+        "security",
+        "tls",
     )
 
-    sni = output_cfg.get(
-        "sni",
-        "",
-    )
+    if security == "tls":
+        proxy["tls"] = True
 
-    if sni:
-        proxy["servername"] = sni
+        sni = TEMPLATE_CFG.get("sni", "")
 
-    fingerprint = output_cfg.get(
-        "client_fingerprint",
-        "",
-    )
+        if sni:
+            proxy["servername"] = sni
 
-    if fingerprint:
-        proxy["client-fingerprint"] = (
-            fingerprint
+        fp = TEMPLATE_CFG.get("fp", "")
+
+        if fp:
+            proxy["client-fingerprint"] = fp
+
+        allow_insecure = bool(
+            TEMPLATE_CFG.get(
+                "allowInsecure",
+                0,
+            )
         )
 
-    if output_cfg.get(
-        "skip_cert_verify",
-        False,
-    ):
+        proxy["skip-cert-verify"] = allow_insecure
 
-        proxy["skip-cert-verify"] = True
-
-    alpn = output_cfg.get(
-        "alpn",
-        None,
-    )
-
-    if alpn:
-        proxy["alpn"] = alpn
-
-    transport = str(
-        output_cfg.get(
-            "transport",
+    node_type = str(
+        TEMPLATE_CFG.get(
+            "type",
             "ws",
         )
     ).lower()
 
-    if transport == "ws":
+    if node_type == "ws":
+        proxy["network"] = "ws"
 
-        ws_path = output_cfg.get(
-            "ws_path",
+        ws_opts = {}
+
+        path = TEMPLATE_CFG.get(
+            "path",
             "/",
         )
 
-        ws_host = output_cfg.get(
-            "ws_host",
+        if path:
+            ws_opts["path"] = path
+
+        host = TEMPLATE_CFG.get(
+            "host",
             "",
         )
 
-        proxy["network"] = "ws"
-
-        proxy["ws-opts"] = {
-            "path": ws_path,
-        }
-
-        if ws_host:
-
-            proxy["ws-opts"][
-                "headers"
-            ] = {
-                "Host": ws_host,
+        if host:
+            ws_opts["headers"] = {
+                "Host": host
             }
 
-    elif transport == "grpc":
+        if ws_opts:
+            proxy["ws-opts"] = ws_opts
 
-        service_name = output_cfg.get(
-            "grpc_service_name",
+    elif node_type == "grpc":
+        proxy["network"] = "grpc"
+
+        service_name = TEMPLATE_CFG.get(
+            "serviceName",
             "",
         )
 
-        proxy["network"] = "grpc"
-
-        proxy["grpc-opts"] = {}
-
         if service_name:
-
-            proxy["grpc-opts"][
-                "grpc-service-name"
-            ] = service_name
+            proxy["grpc-opts"] = {
+                "grpc-service-name": service_name
+            }
 
     return proxy
 
 
-# ============================================================
-# Write Clash YAML
-# ============================================================
-
-def write_clash_yaml(
-    path,
-    proxies,
-):
-
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
+def write_clash_yaml(path, proxies):
     data = {
-        "proxies": proxies,
+        "proxies": proxies
     }
 
     with path.open(
         "w",
         encoding="utf-8",
     ) as f:
-
         yaml.safe_dump(
             data,
             f,
@@ -1347,105 +751,85 @@ def write_clash_yaml(
 
 
 # ============================================================
-# Write index
+# Output
 # ============================================================
 
-def write_index(files):
+DEFAULT_REGION_NAMES = {
+    "HK": "香港",
+    "JP": "日本",
+    "SG": "新加坡",
+    "KR": "韩国",
+    "TW": "台湾",
+    "US": "美国",
+    "DE": "德国",
+    "CN": "中国",
+    "CU": "联通",
+    "CT": "电信",
+    "CMCC": "移动",
+    "OTHER": "其他",
+}
 
-    output_cfg = CFG.get(
-        "output",
+
+def write_index(grouped):
+    regions = dict(DEFAULT_REGION_NAMES)
+
+    configured = OUTPUT_CFG.get(
+        "regions",
         {},
     )
 
-    configured_regions = (
-        output_cfg.get(
-            "regions",
-            {},
-        )
-    )
-
-    region_names = dict(
-        DEFAULT_REGION_NAMES
-    )
-
-    if isinstance(
-        configured_regions,
-        dict,
-    ):
-
-        region_names.update(
-            configured_regions
-        )
+    if isinstance(configured, dict):
+        regions.update(configured)
 
     lines = [
-        "# CF-IP generated files",
-        "",
-        f"Generated: {utc_now()}",
-        "",
+        "<!DOCTYPE html>",
+        "<html>",
+        "<head>",
+        '<meta charset="utf-8">',
+        "<title>CF-IP</title>",
+        "</head>",
+        "<body>",
+        "<h1>CF-IP</h1>",
+        "<ul>",
     ]
 
-    for filename in sorted(files):
-
-        stem = Path(
-            filename
-        ).stem.upper()
-
-        label = region_names.get(
-            stem,
-            stem,
+    for region, items in grouped.items():
+        display = regions.get(
+            region,
+            region,
         )
 
         lines.append(
-            f"- {label}: {filename}"
+            f"<li>{display} ({region}): "
+            f"{len(items)}</li>"
         )
 
-    (
-        OUT / "index.txt"
-    ).write_text(
-        "\n".join(lines) + "\n",
-        encoding="utf-8",
-    )
-
-
-# ============================================================
-# Save history
-# ============================================================
-
-def save_history(history):
-
-    HISTORY_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    with HISTORY_FILE.open(
-        "w",
-        encoding="utf-8",
-    ) as f:
-
-        json.dump(
-            history,
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-
-# ============================================================
-# Clean output
-# ============================================================
-
-def clean_output():
+    lines.extend([
+        "</ul>",
+        "</body>",
+        "</html>",
+    ])
 
     OUT.mkdir(
         parents=True,
         exist_ok=True,
     )
 
+    with (OUT / "index.html").open(
+        "w",
+        encoding="utf-8",
+    ) as f:
+        f.write("\n".join(lines))
+
+
+def clean_output():
+    OUT.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     for path in OUT.iterdir():
-
         if path.is_file():
-
             try:
                 path.unlink()
             except Exception:
@@ -1457,201 +841,102 @@ def clean_output():
 # ============================================================
 
 def main():
-
     print("=" * 60)
     print("CF-IP Generator")
     print("=" * 60)
 
     clean_output()
 
-    # --------------------------------------------------------
-    # Load history
-    # --------------------------------------------------------
-
     history = load_history()
 
-    print(
-        f"[HISTORY] loaded: "
-        f"{len(history)}"
+    current, source_status = parse_sources()
+
+    # --------------------------------------------------------
+    # If all sources failed and there is no history,
+    # abort instead of generating empty output.
+    # --------------------------------------------------------
+
+    successful_sources = any(
+        ok
+        for _, ok, _ in source_status
     )
-
-    # --------------------------------------------------------
-    # Fetch and parse sources
-    # --------------------------------------------------------
-
-    current, source_status = (
-        parse_sources()
-    )
-
-    available_sources = [
-        x
-        for x in source_status
-        if x.get("ok")
-    ]
-
-    # --------------------------------------------------------
-    # Optional domain handling
-    # --------------------------------------------------------
-
-    drop_domains = bool(
-        CFG.get(
-            "input",
-            {}
-        ).get(
-            "drop_domains",
-            False,
-        )
-    )
-
-    if drop_domains:
-
-        current = [
-            item
-            for item in current
-            if item.get("type")
-            != "domain"
-        ]
-
-    # --------------------------------------------------------
-    # Source statistics
-    # --------------------------------------------------------
-
-    print()
-    print(
-        "[SOURCE STATUS]"
-    )
-
-    for source in source_status:
-
-        if source.get("ok"):
-
-            print(
-                f"  OK   "
-                f"{source['name']}: "
-                f"{source['count']}"
-            )
-
-        else:
-
-            print(
-                f"  FAIL "
-                f"{source['name']}: "
-                f"{source.get('error', '')}"
-            )
-
-    # --------------------------------------------------------
-    # If all sources failed and no history
-    # --------------------------------------------------------
 
     if (
-        not available_sources
+        not successful_sources
         and not history
     ):
-
         raise RuntimeError(
-            "All sources unavailable "
-            "and history is empty."
+            "All sources failed and history is empty."
         )
 
     # --------------------------------------------------------
-    # Merge
+    # Merge current candidates with history
     # --------------------------------------------------------
 
     candidates = merge_candidates(
-        history,
         current,
-    )
-
-    print()
-    print(
-        f"[MERGE] candidates: "
-        f"{len(candidates)}"
+        history,
     )
 
     # --------------------------------------------------------
     # Health test
     # --------------------------------------------------------
 
-    candidates = test_candidates(
+    test_candidates(candidates)
+
+    healthy = [
+        item
+        for item in candidates.values()
+        if item.get("_healthy", False)
+    ]
+
+    print(
+        f"[RESULT] healthy: {len(healthy)}"
+    )
+
+    # --------------------------------------------------------
+    # Update / save history
+    # --------------------------------------------------------
+
+    updated_history = update_history(
         candidates
     )
 
-    # --------------------------------------------------------
-    # Update history
-    # --------------------------------------------------------
-
-    history = update_history(
-        history,
-        candidates,
+    updated_history = limit_history(
+        updated_history
     )
 
-    history = limit_history(
-        history
-    )
+    save_history(updated_history)
 
     # --------------------------------------------------------
-    # Save history
+    # Only healthy nodes enter subscriptions
     # --------------------------------------------------------
 
-    save_history(
-        history
-    )
+    good = healthy
 
-    # --------------------------------------------------------
-    # Only healthy nodes
-    # --------------------------------------------------------
-
-    good = [
-        item
-        for item in history.values()
-        if item.get("healthy")
-    ]
-
-    print()
-    print(
-        f"[RESULT] healthy: "
-        f"{len(good)}"
-    )
+    # Remove internal state
+    for item in good:
+        item.pop("_healthy", None)
 
     # --------------------------------------------------------
     # Sort
     # --------------------------------------------------------
 
     good.sort(
-        key=lambda item: (
-            str(
-                item.get(
-                    "region",
-                    "OTHER",
-                )
-            ),
-            str(
-                item.get(
-                    "address",
-                    "",
-                )
-            ),
-            int(
-                item.get(
-                    "port",
-                    443,
-                )
-            ),
+        key=lambda x: (
+            str(x.get("region", "OTHER")),
+            str(x.get("address", "")),
+            int(x.get("port", 443)),
         )
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # Group
-    #
-    # CMCC / CU / CT are independent groups.
-    #
-    # OTHER contains only actual OTHER nodes.
-    # ========================================================
+    # --------------------------------------------------------
 
     grouped = {}
 
     for item in good:
-
         region = str(
             item.get(
                 "region",
@@ -1659,32 +944,27 @@ def main():
             )
         ).upper()
 
-        if not region:
-            region = "OTHER"
+        grouped.setdefault(
+            region,
+            [],
+        ).append(item)
 
-        if region not in grouped:
-            grouped[region] = []
-
-        grouped[region].append(
-            item
-        )
-
-    # --------------------------------------------------------
-    # Ensure known groups exist
-    # --------------------------------------------------------
-
+    # Ensure required groups exist
     for region in (
         "CMCC",
         "CU",
         "CT",
         "OTHER",
     ):
+        grouped.setdefault(
+            region,
+            [],
+        )
 
-        if region not in grouped:
-            grouped[region] = []
-
-    # ========================================================
-    # Number every region independently
+    # --------------------------------------------------------
+    # Number nodes independently inside each group.
+    #
+    # This is important:
     #
     # CMCC:
     #   CMCC-001
@@ -1692,233 +972,177 @@ def main():
     #
     # CU:
     #   CU-001
+    #   CU-002
     #
     # CT:
     #   CT-001
     #
     # OTHER:
     #   OTHER-001
-    # ========================================================
+    #
+    # all.yaml reuses these same names.
+    # --------------------------------------------------------
 
-    for region, region_items in (
-        grouped.items()
-    ):
+    for region, items in grouped.items():
+        max_nodes = int(
+            OUTPUT_CFG.get(
+                "max_nodes_per_region",
+                100,
+            )
+        )
+
+        if max_nodes > 0:
+            items = items[:max_nodes]
+            grouped[region] = items
 
         for idx, item in enumerate(
-            region_items,
+            items,
             1,
         ):
-
             item["_index"] = idx
 
-    # ========================================================
-    # Generate individual region files
-    #
-    # other.yaml ONLY contains OTHER.
-    # ========================================================
+    # --------------------------------------------------------
+    # Per-region outputs
+    # --------------------------------------------------------
 
-    generated_files = []
-
-    for region, region_items in (
-        grouped.items()
-    ):
-
-        if not region_items:
+    for region, items in grouped.items():
+        if not items:
             continue
 
-        txt_nodes = [
+        txt_lines = [
             vless_node(
                 item,
                 item["_index"],
             )
-            for item in region_items
+            for item in items
         ]
 
-        yaml_nodes = [
+        proxies = [
             clash_proxy(
                 item,
                 item["_index"],
             )
-            for item in region_items
+            for item in items
         ]
 
         region_lower = region.lower()
 
-        txt_path = (
-            OUT
-            / f"{region_lower}.txt"
-        )
-
-        yaml_path = (
-            OUT
-            / f"{region_lower}.yaml"
-        )
-
-        write_subscription(
-            txt_path,
-            txt_nodes,
-        )
+        with (
+            OUT / f"{region_lower}.txt"
+        ).open(
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write(
+                "\n".join(txt_lines)
+            )
 
         write_clash_yaml(
-            yaml_path,
-            yaml_nodes,
+            OUT / f"{region_lower}.yaml",
+            proxies,
         )
 
-        generated_files.append(
-            txt_path.name
-        )
-
-        generated_files.append(
-            yaml_path.name
-        )
-
-        print(
-            f"[GROUP] "
-            f"{region}: "
-            f"{len(region_items)}"
-        )
-
-    # ========================================================
-    # Generate ALL YAML
+    # --------------------------------------------------------
+    # all.txt
     #
-    # IMPORTANT:
-    #
-    # Do NOT re-number all nodes here.
-    #
-    # Reuse each node's own _index.
-    #
-    # Therefore:
-    #
-    # CMCC-001 remains CMCC-001
-    # CU-001   remains CU-001
-    # CT-001   remains CT-001
-    # OTHER-001 remains OTHER-001
-    # ========================================================
+    # Keep the original per-region node names.
+    # --------------------------------------------------------
 
-    all_nodes = [
-        clash_proxy(
-            item,
-            item["_index"],
-        )
-        for item in good
-    ]
-
-    write_clash_yaml(
-        OUT / "all.yaml",
-        all_nodes,
-    )
-
-    generated_files.append(
-        "all.yaml"
-    )
-
-    # ========================================================
-    # Generate ALL TXT
-    # ========================================================
-
-    all_txt_nodes = [
+    all_txt = [
         vless_node(
             item,
             item["_index"],
         )
         for item in good
+        if item.get("_index")
     ]
 
-    write_subscription(
-        OUT / "all.txt",
-        all_txt_nodes,
+    with (
+        OUT / "all.txt"
+    ).open(
+        "w",
+        encoding="utf-8",
+    ) as f:
+        f.write(
+            "\n".join(all_txt)
+        )
+
+    # --------------------------------------------------------
+    # all.yaml
+    #
+    # CMCC nodes remain CMCC-xxx
+    # CU nodes remain CU-xxx
+    # CT nodes remain CT-xxx
+    # OTHER nodes remain OTHER-xxx
+    #
+    # No global renumbering.
+    # --------------------------------------------------------
+
+    all_proxies = [
+        clash_proxy(
+            item,
+            item["_index"],
+        )
+        for item in good
+        if item.get("_index")
+    ]
+
+    write_clash_yaml(
+        OUT / "all.yaml",
+        all_proxies,
     )
 
-    generated_files.append(
-        "all.txt"
-    )
-
-    # ========================================================
+    # --------------------------------------------------------
     # Index
-    # ========================================================
+    # --------------------------------------------------------
 
-    write_index(
-        generated_files
-    )
+    write_index(grouped)
 
-    # ========================================================
+    # --------------------------------------------------------
     # Statistics
-    # ========================================================
+    # --------------------------------------------------------
 
-    stats = {}
-
-    for item in good:
-
-        region = str(
-            item.get(
-                "region",
-                "OTHER",
-            )
-        ).upper()
-
-        stats[region] = (
-            stats.get(
-                region,
-                0,
-            )
-            + 1
-        )
-
-    print()
     print("=" * 60)
-    print("FINAL STATISTICS")
+    print("OUTPUT")
     print("=" * 60)
 
-    for region in sorted(stats):
+    for region in sorted(grouped):
+        count = len(
+            grouped[region]
+        )
 
-        label = (
-            DEFAULT_REGION_NAMES.get(
-                region,
-                region,
+        if count:
+            print(
+                f"  {region}: {count}"
             )
-        )
 
-        print(
-            f"{region:<6} "
-            f"{label:<8} "
-            f"{stats[region]}"
-        )
-
-    print()
     print(
-        f"TOTAL: {len(good)}"
+        f"  ALL: {len(all_proxies)}"
     )
 
-    print()
-    print(
-        f"Output directory: {OUT}"
-    )
-
+    print("=" * 60)
+    print("DONE")
     print("=" * 60)
 
 
 # ============================================================
-# Entry point
+# Entry
 # ============================================================
 
 if __name__ == "__main__":
-
     try:
         main()
 
     except KeyboardInterrupt:
-
         print(
-            "\nInterrupted."
+            "\nInterrupted.",
+            file=sys.stderr,
         )
-
         sys.exit(130)
 
     except Exception as e:
-
         print(
-            f"\nERROR: {e}",
+            f"ERROR: {e}",
             file=sys.stderr,
         )
-
         sys.exit(1)
