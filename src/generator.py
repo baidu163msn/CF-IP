@@ -1897,7 +1897,7 @@ def main():
     #   other.yaml
     #   cmcc.yaml
     #
-    # 在 all.txt / all.yaml 里，两种名称各出现一次。
+    # 在 all.txt / all.yaml 里，这些节点只保留运营商名称那一份。
     # ========================================================
 
     operator_grouped = {}
@@ -2020,6 +2020,10 @@ def main():
     operator_nodes_all = []
     operator_items_all = []
 
+    # 已经进入运营商文件的节点（原始对象的 id）。
+    # all 里这些节点只保留运营商名称那一份，不再保留地区名称的那份。
+    operator_selected_ids = set()
+
     for operator, items in sorted(
         operator_grouped.items()
     ):
@@ -2029,6 +2033,11 @@ def main():
 
         if not items:
             continue
+
+        operator_selected_ids.update(
+            id(item)
+            for item in items
+        )
 
         nodes = [
             vless_node(
@@ -2094,18 +2103,27 @@ def main():
     # ========================================================
     # ALL TXT + ALL YAML
     #
-    # 两者内容一致：地区节点 + 运营商节点。
+    # 两者内容一致：地区节点（去掉已在运营商文件里的） + 运营商节点。
+    # 每个 IP 只出现一次。
     # ========================================================
+
+    # 地区节点里去掉已经进入运营商文件的（避免同一个 IP 出现两次）。
+    # 编号沿用地区文件里的编号，所以会有空缺，但名称与 hk.yaml 等保持一致。
+    all_region_items = [
+        item
+        for item in all_items
+        if id(item) not in operator_selected_ids
+    ]
 
     all_nodes = [
         vless_node(
             item,
             item["_index"]
         )
-        for item in all_items
+        for item in all_region_items
     ]
 
-    # all 汇总：地区文件的节点 + 运营商文件的节点（CMCC-1 / CT-1 / CU-1）
+    # all 汇总：剩余的地区节点 + 运营商文件的节点（CMCC-1 / CT-1 / CU-1）
     all_nodes += operator_nodes_all
 
     if not all_nodes:
@@ -2123,7 +2141,7 @@ def main():
 
     write_clash_yaml(
         OUT / "all.yaml",
-        all_items + operator_items_all
+        all_region_items + operator_items_all
     )
 
     # ========================================================
@@ -2148,7 +2166,7 @@ def main():
 
     print(
         f"[DONE] generated "
-        f"{len(all_items) + len(operator_items_all)} Mihomo proxies"
+        f"{len(all_region_items) + len(operator_items_all)} Mihomo proxies"
     )
 
     print(
