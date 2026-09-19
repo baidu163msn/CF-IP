@@ -48,8 +48,15 @@ MAX_HISTORY = 5000
 # 正则
 # ============================================================
 
+# 地区识别
 REGION_RE = re.compile(
     r"\b(HK|JP|SG|KR|TW|US|DE|CN)\b",
+    re.I
+)
+
+# 运营商识别
+OPERATOR_RE = re.compile(
+    r"\b(CU|CT|CMCC)\b",
     re.I
 )
 
@@ -112,6 +119,58 @@ def region_from_comment(
 
         "中国": "CN",
         "china": "CN",
+    }
+
+    for key, value in aliases.items():
+        if key in text:
+            return value
+
+    return "OTHER"
+
+
+# ============================================================
+# 运营商识别
+#
+# 支持：
+#   CU / CT / CMCC
+#   联通 / 电信 / 移动
+#   中国联通 / 中国电信 / 中国移动
+#   China Unicom / China Telecom / China Mobile
+#
+# 无法识别时：
+#   OTHER
+# ============================================================
+
+def operator_from_comment(
+    comment: str,
+    source_name: str
+) -> str:
+
+    m = OPERATOR_RE.search(comment or "")
+
+    if m:
+        return m.group(1).upper()
+
+    text = (comment or "").lower()
+
+    aliases = {
+        # 联通
+        "联通": "CU",
+        "中国联通": "CU",
+        "china unicom": "CU",
+        "unicom": "CU",
+
+        # 电信
+        "电信": "CT",
+        "中国电信": "CT",
+        "china telecom": "CT",
+        "telecom": "CT",
+
+        # 移动
+        "移动": "CMCC",
+        "中国移动": "CMCC",
+        "china mobile": "CMCC",
+        "mobile": "CMCC",
     }
 
     for key, value in aliases.items():
@@ -206,7 +265,20 @@ def parse_line(
     if kind == "domain" and addr_type != "domain":
         return None
 
+    # --------------------------------------------------------
+    # 地区
+    # --------------------------------------------------------
+
     region = region_from_comment(
+        comment or "",
+        source_name
+    )
+
+    # --------------------------------------------------------
+    # 运营商
+    # --------------------------------------------------------
+
+    operator = operator_from_comment(
         comment or "",
         source_name
     )
@@ -215,6 +287,7 @@ def parse_line(
         "address": address,
         "port": port,
         "region": region,
+        "operator": operator,
         "comment": comment or "",
         "source": source_name,
         "type": addr_type,
@@ -398,22 +471,32 @@ def load_history():
             clean[str(key)] = {
                 "address": str(address),
                 "port": port,
+
                 "region": item.get(
                     "region",
                     "OTHER"
                 ),
+
+                "operator": item.get(
+                    "operator",
+                    "OTHER"
+                ),
+
                 "comment": item.get(
                     "comment",
                     ""
                 ),
+
                 "source": item.get(
                     "source",
                     "HISTORY"
                 ),
+
                 "type": item.get(
                     "type",
                     "ipv4"
                 ),
+
                 "failures": max(
                     0,
                     int(item.get(
@@ -421,22 +504,27 @@ def load_history():
                         0
                     ))
                 ),
+
                 "first_seen": item.get(
                     "first_seen",
                     utc_now()
                 ),
+
                 "last_seen": item.get(
                     "last_seen",
                     ""
                 ),
+
                 "last_success": item.get(
                     "last_success",
                     ""
                 ),
+
                 "last_failure": item.get(
                     "last_failure",
                     ""
                 ),
+
                 "last_error": item.get(
                     "last_error",
                     ""
@@ -468,7 +556,7 @@ def load_history():
 #   source_current = False
 #
 # 如果历史 IP 又出现在当前源：
-#   更新 source / comment / region
+#   更新 source / comment / region / operator
 # ============================================================
 
 def merge_candidates(
@@ -817,22 +905,32 @@ def update_history(
             record = {
                 "address": item["address"],
                 "port": item["port"],
+
                 "region": item.get(
                     "region",
                     "OTHER"
                 ),
+
+                "operator": item.get(
+                    "operator",
+                    "OTHER"
+                ),
+
                 "comment": item.get(
                     "comment",
                     ""
                 ),
+
                 "source": item.get(
                     "source",
                     "HISTORY"
                 ),
+
                 "type": item.get(
                     "type",
                     "ipv4"
                 ),
+
                 "failures": 0,
                 "first_seen": now,
                 "last_seen": "",
@@ -847,7 +945,10 @@ def update_history(
 
             record = dict(old)
 
+            # ------------------------------------------------
             # 当前源出现时更新元数据
+            # ------------------------------------------------
+
             if item.get(
                 "source_current",
                 False
@@ -857,6 +958,14 @@ def update_history(
                     "region",
                     record.get(
                         "region",
+                        "OTHER"
+                    )
+                )
+
+                record["operator"] = item.get(
+                    "operator",
+                    record.get(
+                        "operator",
                         "OTHER"
                     )
                 )
@@ -885,7 +994,10 @@ def update_history(
                     )
                 )
 
+        # ----------------------------------------------------
         # 当前源中出现
+        # ----------------------------------------------------
+
         if item.get(
             "source_current",
             False
@@ -1051,13 +1163,20 @@ def limit_history(history):
 
 def vless_node(
     item,
-    index
+    index,
+    group=None
 ):
 
     t = CFG["template"]
 
+    # --------------------------------------------------------
+    # group 未指定时，继续使用原来的地区
+    # --------------------------------------------------------
+
+    group = group or item["region"]
+
     name = CFG["output"]["naming"].format(
-        REGION=item["region"],
+        REGION=group,
         INDEX=index
     )
 
@@ -1154,13 +1273,20 @@ def write_subscription(
 
 def clash_proxy(
     item,
-    index
+    index,
+    group=None
 ):
 
     t = CFG["template"]
 
+    # --------------------------------------------------------
+    # group 未指定时，继续使用原来的地区
+    # --------------------------------------------------------
+
+    group = group or item["region"]
+
     name = CFG["output"]["naming"].format(
-        REGION=item["region"],
+        REGION=group,
         INDEX=index
     )
 
@@ -1271,13 +1397,15 @@ def clash_proxy(
 
 def write_clash_yaml(
     path: Path,
-    items
+    items,
+    group=None
 ):
 
     proxies = [
         clash_proxy(
             item,
-            item["_index"]
+            item["_index"],
+            group=group
         )
         for item in items
     ]
@@ -1384,7 +1512,7 @@ def write_index(history_stats=None):
         + "</ul>"
         + extra_html
         + "</body>"
-        "</html>"
+        + "</html>"
     )
 
     (
@@ -1735,6 +1863,12 @@ def main():
 
     # ========================================================
     # 按地区分组
+    #
+    # 原有逻辑保持不变：
+    #
+    # HK / JP / SG / KR / TW / US / DE / CN / OTHER
+    #
+    # 运营商分组是额外输出，不替代这里。
     # ========================================================
 
     grouped = {}
@@ -1745,6 +1879,44 @@ def main():
             item["region"],
             []
         ).append(item)
+
+    # ========================================================
+    # 按运营商分组
+    #
+    # 这是新增功能：
+    #
+    # CU   = 联通
+    # CT   = 电信
+    # CMCC = 移动
+    #
+    # 注意：
+    # 一个节点可以同时出现在：
+    #
+    #   other.yaml
+    #   cmcc.yaml
+    #
+    # 但 all.yaml 只出现一次。
+    # ========================================================
+
+    operator_grouped = {}
+
+    for item in good:
+
+        operator = item.get(
+            "operator",
+            "OTHER"
+        )
+
+        if operator in (
+            "CU",
+            "CT",
+            "CMCC"
+        ):
+
+            operator_grouped.setdefault(
+                operator,
+                []
+            ).append(item)
 
     # ========================================================
     # 最终节点
@@ -1825,9 +1997,96 @@ def main():
         )
 
     # ========================================================
+    # 按运营商生成 CU / CT / CMCC TXT + YAML
+    #
+    # 运营商文件是额外筛选订阅：
+    #
+    #   cu.txt
+    #   cu.yaml
+    #
+    #   ct.txt
+    #   ct.yaml
+    #
+    #   cmcc.txt
+    #   cmcc.yaml
+    #
+    # 不加入 all_items，避免 all.txt / all.yaml 重复。
+    # ========================================================
+
+    for operator, items in sorted(
+        operator_grouped.items()
+    ):
+
+        # 每个运营商最多 max_nodes_per_region
+        items = items[:maxn]
+
+        if not items:
+            continue
+
+        nodes = [
+            vless_node(
+                item,
+                index,
+                group=operator
+            )
+            for index, item in enumerate(
+                items,
+                1
+            )
+        ]
+
+        operator_name = operator.lower()
+
+        # ----------------------------------------------------
+        # TXT
+        # ----------------------------------------------------
+
+        write_subscription(
+            OUT / f"{operator_name}.txt",
+            nodes
+        )
+
+        # ----------------------------------------------------
+        # YAML
+        # ----------------------------------------------------
+
+        # 这里不能使用地区生成时留下的 _index，
+        # 运营商文件自己从 1 开始编号。
+        #
+        # clash_proxy() 使用 group=operator，
+        # 所以名称会是：
+        #
+        #   CU-1
+        #   CT-1
+        #   CMCC-1
+        #
+        operator_items = []
+
+        for index, item in enumerate(
+            items,
+            1
+        ):
+
+            temp_item = dict(item)
+            temp_item["_index"] = index
+            operator_items.append(
+                temp_item
+            )
+
+        write_clash_yaml(
+            OUT / f"{operator_name}.yaml",
+            operator_items,
+            group=operator
+        )
+
+    # ========================================================
     # ALL TXT + ALL YAML
     #
     # 两者严格使用同一个 all_items。
+    #
+    # 注意：
+    # 这里仍然保持原有逻辑，
+    # 不会因为新增运营商分组而重复加入节点。
     # ========================================================
 
     all_nodes = [
@@ -1885,6 +2144,28 @@ def main():
         f"[DONE] history pool "
         f"{len(new_history)}/{MAX_HISTORY}"
     )
+
+    # --------------------------------------------------------
+    # 运营商统计
+    # --------------------------------------------------------
+
+    for operator in (
+        "CU",
+        "CT",
+        "CMCC"
+    ):
+
+        count = len(
+            operator_grouped.get(
+                operator,
+                []
+            )
+        )
+
+        print(
+            f"[DONE] {operator}: "
+            f"{count} healthy nodes"
+        )
 
     print(
         "============================================================"
