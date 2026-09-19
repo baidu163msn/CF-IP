@@ -4,9 +4,6 @@ sources:
   - name: LT-LZ
     url: https://raw.githubusercontent.com/love-ztm/cfip/refs/heads/main/ubest_ips.txt
     kind: ip
-  - name: LT-MJZ
-    url: https://cf.junzhen.qzz.io/best_ips.txt
-    kind: ip
 
 template:
   uuid: "2a2038c5-a62c-4f59-af4f-733426d37193"
