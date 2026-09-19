@@ -1401,168 +1401,19 @@ def write_clash_yaml(
     group=None
 ):
 
+    # 节点自带 _group（如 CMCC）时优先用它命名，
+    # 这样 all.yaml 里可以同时放地区节点和运营商节点。
     proxies = [
         clash_proxy(
             item,
             item["_index"],
-            group=group
+            group=item.get("_group") or group
         )
         for item in items
     ]
 
     data = {
         "proxies": proxies
-    }
-
-    path.write_text(
-        yaml.safe_dump(
-            data,
-            allow_unicode=True,
-            sort_keys=False,
-            default_flow_style=False
-        ),
-        encoding="utf-8"
-    )
-
-
-# ============================================================
-# all.yaml：完整 Mihomo / Clash 配置
-#
-# all.yaml 不再只是一个 proxies 列表，而是：
-#
-#   proxies        所有节点（每个节点只出现一次，不重复）
-#   proxy-groups   按分类分组，成员引用 proxies 里的节点名：
-#                    cmcc（移动）/ cn（中国）/ ct（电信）/ cu（联通）
-#                    de（德国）/ hk（香港）/ jp（日本）/ kr（韩国）
-#                    other（其他）……有节点的分类才会生成
-#   rules          MATCH 兜底到「节点选择」
-#
-# 同一个节点可以同时属于「地区分组」和「运营商分组」，
-# 但 proxies 里只有一份，所以不会重复。
-# ============================================================
-
-OPERATOR_CODES = ("CU", "CT", "CMCC")
-
-DEFAULT_GROUP_LABELS = {
-    "CMCC": "移动",
-    "CN": "中国",
-    "CT": "电信",
-    "CU": "联通",
-    "DE": "德国",
-    "HK": "香港",
-    "JP": "日本",
-    "KR": "韩国",
-    "SG": "新加坡",
-    "TW": "台湾",
-    "US": "美国",
-    "OTHER": "其他",
-}
-
-MAIN_GROUP_NAME = "节点选择"
-GROUP_TEST_URL = "https://www.gstatic.com/generate_204"
-GROUP_TEST_INTERVAL = 300
-
-# 分类分组的类型：
-#   url-test  自动测速，选延迟最低的
-#   select    手动选择
-GROUP_TYPE = "url-test"
-
-
-def proxy_name(item):
-
-    return CFG["output"]["naming"].format(
-        REGION=item["region"],
-        INDEX=item["_index"]
-    )
-
-
-def group_label(code):
-
-    labels = dict(DEFAULT_GROUP_LABELS)
-
-    # config.yml 的 output.regions 优先
-    labels.update(
-        {
-            str(k).upper(): v
-            for k, v in (
-                CFG.get("output", {}).get("regions", {}) or {}
-            ).items()
-        }
-    )
-
-    return labels.get(code, code)
-
-
-def write_all_yaml(
-    path: Path,
-    items
-):
-
-    proxies = [
-        clash_proxy(item, item["_index"])
-        for item in items
-    ]
-
-    # --------------------------------------------------------
-    # 分类 -> 节点名
-    # --------------------------------------------------------
-
-    members = {}
-
-    for item in items:
-
-        name = proxy_name(item)
-
-        # 地区分组（含 OTHER）
-        members.setdefault(
-            item["region"],
-            []
-        ).append(name)
-
-        # 运营商分组（OTHER 表示未识别，不生成运营商分组）
-        operator = item.get("operator", "OTHER")
-
-        if operator in OPERATOR_CODES:
-            members.setdefault(
-                operator,
-                []
-            ).append(name)
-
-    # --------------------------------------------------------
-    # proxy-groups
-    # --------------------------------------------------------
-
-    groups = []
-    group_names = []
-
-    for code in sorted(members):
-
-        label = group_label(code)
-
-        group = {
-            "name": label,
-            "type": GROUP_TYPE,
-            "proxies": members[code],
-        }
-
-        if GROUP_TYPE == "url-test":
-            group["url"] = GROUP_TEST_URL
-            group["interval"] = GROUP_TEST_INTERVAL
-            group["tolerance"] = 50
-
-        groups.append(group)
-        group_names.append(label)
-
-    main_group = {
-        "name": MAIN_GROUP_NAME,
-        "type": "select",
-        "proxies": group_names + ["DIRECT"],
-    }
-
-    data = {
-        "proxies": proxies,
-        "proxy-groups": [main_group] + groups,
-        "rules": [f"MATCH,{MAIN_GROUP_NAME}"],
     }
 
     path.write_text(
@@ -2046,7 +1897,7 @@ def main():
     #   other.yaml
     #   cmcc.yaml
     #
-    # 但 all.txt / all.yaml 里只出现一次。
+    # 在 all.txt / all.yaml 里，两种名称各出现一次。
     # ========================================================
 
     operator_grouped = {}
@@ -2161,8 +2012,13 @@ def main():
     #   cmcc.txt
     #   cmcc.yaml
     #
-    # 这里不直接改 all_items，下面统一去重后再并入 all。
+    # 这些节点用运营商名称编号（CMCC-1 等），
+    # 会单独并入 all.txt / all.yaml。
     # ========================================================
+
+    # 收集运营商文件里的节点（名称如 CMCC-1），供 all 汇总
+    operator_nodes_all = []
+    operator_items_all = []
 
     for operator, items in sorted(
         operator_grouped.items()
@@ -2187,6 +2043,8 @@ def main():
         ]
 
         operator_name = operator.lower()
+
+        operator_nodes_all.extend(nodes)
 
         # ----------------------------------------------------
         # TXT
@@ -2220,6 +2078,7 @@ def main():
 
             temp_item = dict(item)
             temp_item["_index"] = index
+            temp_item["_group"] = operator
             operator_items.append(
                 temp_item
             )
@@ -2230,53 +2089,12 @@ def main():
             group=operator
         )
 
-    # ========================================================
-    # 把运营商文件里的节点并入 all_items
-    #
-    # 地区文件每个地区只取前 maxn 个，运营商文件是另一次
-    # 截取，两者可能有不在对方里的节点。
-    # 为了让 all 真正包含 cmcc / ct / cu 的全部节点，
-    # 这里把还没进入 all_items 的运营商节点补进去。
-    #
-    # 已经在 all_items 里的节点（同一个 dict）不会重复添加。
-    # 补进来的节点接着所在地区的编号往后排，名称不会冲突。
-    # ========================================================
-
-    region_counter = {
-        region: min(len(items), maxn)
-        for region, items in grouped.items()
-    }
-
-    seen_ids = {id(item) for item in all_items}
-
-    for operator, items in sorted(
-        operator_grouped.items()
-    ):
-
-        for item in items[:maxn]:
-
-            if id(item) in seen_ids:
-                continue
-
-            seen_ids.add(id(item))
-
-            region_counter[item["region"]] = (
-                region_counter.get(item["region"], 0) + 1
-            )
-
-            item["_index"] = region_counter[item["region"]]
-
-            all_items.append(item)
+        operator_items_all.extend(operator_items)
 
     # ========================================================
     # ALL TXT + ALL YAML
     #
-    # 两者严格使用同一个 all_items。
-    #
-    # all.txt  ：Base64 VLESS 订阅（只能放节点，没有分组）
-    # all.yaml ：完整 Mihomo 配置，带 proxy-groups，
-    #            按 移动 / 中国 / 电信 / 联通 / 德国 / 香港 /
-    #            日本 / 韩国 / 其他 分组
+    # 两者内容一致：地区节点 + 运营商节点。
     # ========================================================
 
     all_nodes = [
@@ -2286,6 +2104,9 @@ def main():
         )
         for item in all_items
     ]
+
+    # all 汇总：地区文件的节点 + 运营商文件的节点（CMCC-1 / CT-1 / CU-1）
+    all_nodes += operator_nodes_all
 
     if not all_nodes:
 
@@ -2300,9 +2121,9 @@ def main():
         all_nodes
     )
 
-    write_all_yaml(
+    write_clash_yaml(
         OUT / "all.yaml",
-        all_items
+        all_items + operator_items_all
     )
 
     # ========================================================
@@ -2327,7 +2148,7 @@ def main():
 
     print(
         f"[DONE] generated "
-        f"{len(all_items)} Mihomo proxies"
+        f"{len(all_items) + len(operator_items_all)} Mihomo proxies"
     )
 
     print(
