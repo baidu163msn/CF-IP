@@ -19,7 +19,9 @@ import yaml
 # Paths
 # ============================================================
 
-ROOT = Path(__file__).resolve().parent
+SRC_DIR = Path(__file__).resolve().parent
+ROOT = SRC_DIR.parent
+
 CONFIG_FILE = ROOT / "config.yml"
 HISTORY_FILE = ROOT / "history.json"
 OUT = ROOT / "output"
