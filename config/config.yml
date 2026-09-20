@@ -1,18 +1,18 @@
 # cf-vless-generator
 # 所有可变参数集中在这里，GitHub Actions / Python 无需修改。
 sources:
-  - name: YD-V4
-    url: https://raw.githubusercontent.com/svip-s/cloudflare_ip/refs/heads/main/best_ips.txt
+  - name: LT-V4
+    url: https://raw.githubusercontent.com/love-ztm/cfip/refs/heads/main/ubest_ips.txt
     kind: ip
 
 template:
-  uuid: "ade2ed4a-9040-4e1a-a086-3a44cb5d017b"
-  path: "/vl/K3Gy4eepcyrBuXpkgO8FJ3VyCnfCNTi?ed=2560"
+  uuid: "2a2038c5-a62c-4f59-af4f-733426d37193"
+  path: "/vl/dDKPss38OHmB6cizTN82KRI?ed=2560"
   security: "tls"
   alpn: "http/1.1"
   encryption: "none"
   insecure: 0
-  host: "b.95500.us.ci"
+  host: "b.0246.us.ci"
   fp: "chrome"
   # type: ws | grpc（其它值会退化为不带专属参数的通用 VLESS 链接）
   type: "ws"
@@ -20,7 +20,7 @@ template:
   # 以及 Mihomo 的 grpc-opts.grpc-service-name
   serviceName: ""
   allowInsecure: 0
-  sni: "b.95500.us.ci"
+  sni: "b.0246.us.ci"
 
 test:
   enabled: true
