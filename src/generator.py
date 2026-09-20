@@ -11,6 +11,7 @@ import re
 import socket
 import ssl
 import sys
+import time
 from pathlib import Path
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -41,7 +42,7 @@ CFG = yaml.safe_load(
 )
 
 MAX_FAILURES = 3
-MAX_HISTORY = 5000
+MAX_HISTORY_DEFAULT = 5000
 
 
 # ============================================================
@@ -115,6 +116,40 @@ def region_from_comment(
     }
 
     for key, value in aliases.items():
+        if key in text:
+            return value
+
+    return "OTHER"
+
+
+# ============================================================
+# 运营商识别（移动 / 联通 / 电信）
+# ============================================================
+
+ISP_ALIASES = {
+    "中国移动": "MOBILE",
+    "移动": "MOBILE",
+    "mobile": "MOBILE",
+    "cmcc": "MOBILE",
+
+    "中国联通": "UNICOM",
+    "联通": "UNICOM",
+    "unicom": "UNICOM",
+    "cucc": "UNICOM",
+
+    "中国电信": "TELECOM",
+    "电信": "TELECOM",
+    "telecom": "TELECOM",
+    "ctcc": "TELECOM",
+}
+
+
+def isp_from_comment(comment: str) -> str:
+
+    text = (comment or "").lower()
+
+    for key, value in ISP_ALIASES.items():
+
         if key in text:
             return value
 
@@ -211,10 +246,15 @@ def parse_line(
         source_name
     )
 
+    isp = isp_from_comment(
+        comment or ""
+    )
+
     return {
         "address": address,
         "port": port,
         "region": region,
+        "isp": isp,
         "comment": comment or "",
         "source": source_name,
         "type": addr_type,
@@ -402,6 +442,10 @@ def load_history():
                     "region",
                     "OTHER"
                 ),
+                "isp": item.get(
+                    "isp",
+                    "OTHER"
+                ),
                 "comment": item.get(
                     "comment",
                     ""
@@ -558,6 +602,196 @@ def merge_candidates(
 
 
 # ============================================================
+# 真实性检测（WebSocket 升级探测）
+#
+# 单纯的 TLS 握手成功，只能证明这个 IP 上有台机器愿意
+# 完成 TLS 握手（很多 CF 边缘 IP 对谁都会握手成功），
+# 并不能证明它真的把流量转发到了你的后端。
+#
+# 这里在 TLS 之上，按 config.yml 里配置的 path/host，
+# 发一个真实的 HTTP WebSocket 升级请求：
+#   - 如果对端返回 "101 Switching Protocols"，
+#     说明 CDN -> 源站 -> WS 服务这条链路是真的通的。
+#   - 否则（403/404/521/522 等，或者压根没响应），
+#     说明这个 IP 现在并不能真正代理到你的节点。
+#
+# 目前只对 template.type == "ws" 生效；
+# grpc 传输的真实性探测复杂得多，暂不支持，
+# 会退化为只做 TLS 握手检测。
+# ============================================================
+
+# ============================================================
+# gRPC 真实性检测（HTTP/2 探测）
+#
+# gRPC 是跑在 HTTP/2 上的，不能像 WS 那样直接发一段
+# HTTP/1.1 文本就完事，需要真正的 HTTP/2 帧交互。
+#
+# 这里用 h2 库（纯 Python 的 HTTP/2 协议状态机）在已经
+# 建立好的 TLS 连接上：
+#   1. 发送 HTTP/2 连接前言 + SETTINGS
+#   2. 对 serviceName 发一个 POST 请求
+#      （不需要携带合法的 protobuf body/凭据，
+#       只要服务端愿意用 HTTP/2 语义回应，
+#       哪怕是 grpc-status 报错，也说明
+#       CDN -> 源站 -> gRPC 服务这条链路是通的）
+#   3. 读到任何带 :status 的 HEADERS/TRAILERS 帧就算成功
+#
+# 需要 requirements.txt 里安装 h2（h2>=4,<5）。
+# 没装的话，这个函数会抛异常，外层会把该次检测标记为失败，
+# 并在日志里提示装 h2，不会导致整个脚本崩溃。
+# ============================================================
+
+def grpc_upgrade_check(
+    ssock,
+    timeout: float
+) -> str:
+
+    import h2.connection
+    import h2.events
+
+    t = CFG["template"]
+
+    service_name = (
+        t.get("serviceName", "")
+        or "grpc"
+    )
+
+    conn = h2.connection.H2Connection()
+    conn.initiate_connection()
+    ssock.sendall(
+        conn.data_to_send()
+    )
+
+    stream_id = conn.get_next_available_stream_id()
+
+    headers = [
+        (":method", "POST"),
+        (":path", f"/{service_name}/Ping"),
+        (":scheme", "https"),
+        (":authority", t["host"]),
+        ("content-type", "application/grpc"),
+        ("te", "trailers"),
+    ]
+
+    conn.send_headers(
+        stream_id,
+        headers,
+        end_stream=True
+    )
+
+    ssock.sendall(
+        conn.data_to_send()
+    )
+
+    ssock.settimeout(timeout)
+
+    status = ""
+    deadline = time.monotonic() + timeout
+
+    while (
+        not status
+        and time.monotonic() < deadline
+    ):
+
+        try:
+            data = ssock.recv(65536)
+        except socket.timeout:
+            break
+
+        if not data:
+            break
+
+        events = conn.receive_data(data)
+
+        outbound = conn.data_to_send()
+
+        if outbound:
+            ssock.sendall(outbound)
+
+        stream_ended = False
+
+        for event in events:
+
+            headers_list = None
+
+            if isinstance(
+                event,
+                (
+                    h2.events.ResponseReceived,
+                    h2.events.TrailersReceived
+                )
+            ):
+                headers_list = event.headers
+
+            if headers_list:
+
+                for name, value in headers_list:
+
+                    key = (
+                        name.decode()
+                        if isinstance(name, bytes)
+                        else name
+                    )
+
+                    val = (
+                        value.decode()
+                        if isinstance(value, bytes)
+                        else value
+                    )
+
+                    if key == ":status":
+                        status = val
+
+            if isinstance(
+                event,
+                h2.events.StreamEnded
+            ):
+                stream_ended = True
+
+        if stream_ended:
+            break
+
+    return status
+
+
+def ws_upgrade_check(ssock, timeout: float) -> str:
+
+    t = CFG["template"]
+
+    key = base64.b64encode(
+        os.urandom(16)
+    ).decode()
+
+    request = (
+        f"GET {t['path']} HTTP/1.1\r\n"
+        f"Host: {t['host']}\r\n"
+        f"Connection: Upgrade\r\n"
+        f"Upgrade: websocket\r\n"
+        f"Sec-WebSocket-Version: 13\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        f"\r\n"
+    )
+
+    ssock.settimeout(timeout)
+    ssock.sendall(request.encode())
+
+    data = ssock.recv(4096)
+
+    if not data:
+        return ""
+
+    status_line = data.split(
+        b"\r\n",
+        1
+    )[0].decode(
+        "ascii",
+        "replace"
+    )
+
+    return status_line
+
+
+# ============================================================
 # TCP + TLS 测试
 # ============================================================
 
@@ -598,6 +832,15 @@ def tcp_tls_test(item):
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
 
+            # gRPC 真实性检测需要协商到 h2；
+            # 同时保留 http/1.1 以免影响 WS 场景。
+            try:
+                ctx.set_alpn_protocols(
+                    ["h2", "http/1.1"]
+                )
+            except NotImplementedError:
+                pass
+
             with ctx.wrap_socket(
                 sock,
                 server_hostname=CFG[
@@ -605,9 +848,125 @@ def tcp_tls_test(item):
                 ]["sni"]
             ) as ssock:
 
-                return (
-                    True,
+                tls_version = (
                     ssock.version() or ""
+                )
+
+                # ================================================
+                # test.real_check
+                #
+                # 打开后，TLS 握手成功只是第一步，
+                # 还要求 WebSocket 升级请求得到 101 响应，
+                # 才认为这个节点真正可用。
+                # ================================================
+
+                real_check = bool(
+                    CFG["test"].get(
+                        "real_check",
+                        False
+                    )
+                )
+
+                transport_type = str(
+                    CFG["template"].get(
+                        "type",
+                        ""
+                    )
+                ).lower()
+
+                if not real_check or transport_type not in (
+                    "ws",
+                    "grpc"
+                ):
+                    return True, tls_version
+
+                real_timeout = float(
+                    CFG["test"].get(
+                        "real_check_timeout",
+                        tls_timeout
+                    )
+                )
+
+                # ------------------------------------------------
+                # WebSocket：发 HTTP/1.1 升级请求，期望 101
+                # ------------------------------------------------
+
+                if transport_type == "ws":
+
+                    try:
+
+                        status_line = ws_upgrade_check(
+                            ssock,
+                            real_timeout
+                        )
+
+                    except Exception as e:
+
+                        return (
+                            False,
+                            f"ws-check-error: {e}"
+                        )
+
+                    if "101" in status_line:
+
+                        return (
+                            True,
+                            f"{tls_version} | {status_line}"
+                        )
+
+                    return (
+                        False,
+                        f"ws-check-rejected: "
+                        f"{status_line or '(no response)'}"
+                    )
+
+                # ------------------------------------------------
+                # gRPC：需要先协商到 h2，再发真实的 HTTP/2 请求
+                # ------------------------------------------------
+
+                alpn = ssock.selected_alpn_protocol()
+
+                if alpn != "h2":
+
+                    return (
+                        False,
+                        f"grpc-check-rejected: "
+                        f"ALPN negotiated '{alpn}', expected h2"
+                    )
+
+                try:
+
+                    status = grpc_upgrade_check(
+                        ssock,
+                        real_timeout
+                    )
+
+                except ImportError:
+
+                    return (
+                        False,
+                        "grpc-check-error: "
+                        "h2 library not installed "
+                        "(add 'h2' to requirements.txt)"
+                    )
+
+                except Exception as e:
+
+                    return (
+                        False,
+                        f"grpc-check-error: {e}"
+                    )
+
+                if status:
+
+                    return (
+                        True,
+                        f"{tls_version} | grpc:{status}"
+                    )
+
+                return (
+                    False,
+                    "grpc-check-rejected: (no response)"
                 )
 
     except Exception as e:
@@ -821,6 +1180,10 @@ def update_history(
                     "region",
                     "OTHER"
                 ),
+                "isp": item.get(
+                    "isp",
+                    "OTHER"
+                ),
                 "comment": item.get(
                     "comment",
                     ""
@@ -857,6 +1220,14 @@ def update_history(
                     "region",
                     record.get(
                         "region",
+                        "OTHER"
+                    )
+                )
+
+                record["isp"] = item.get(
+                    "isp",
+                    record.get(
+                        "isp",
                         "OTHER"
                     )
                 )
@@ -1016,7 +1387,17 @@ def history_sort_key(item):
 
 def limit_history(history):
 
-    if len(history) <= MAX_HISTORY:
+    max_history = int(
+        CFG.get(
+            "history",
+            {}
+        ).get(
+            "max_pool_size",
+            MAX_HISTORY_DEFAULT
+        )
+    )
+
+    if len(history) <= max_history:
 
         return history, 0
 
@@ -1032,13 +1413,13 @@ def limit_history(history):
     )
 
     kept = dict(
-        records[:MAX_HISTORY]
+        records[:max_history]
     )
 
     removed = len(history) - len(kept)
 
     print(
-        f"[HISTORY] limit {MAX_HISTORY}: "
+        f"[HISTORY] limit {max_history}: "
         f"removed {removed} oldest/weak entries"
     )
 
@@ -1316,6 +1697,15 @@ def write_index(history_stats=None):
         {}
     )
 
+    # 运营商中文对照表（mobile/unicom/telecom.txt 用）
+    isp_names = CFG.get(
+        "output",
+        {}
+    ).get(
+        "isp_names",
+        {}
+    )
+
     links = []
 
     for p in files:
@@ -1334,6 +1724,13 @@ def write_index(history_stats=None):
                 label = (
                     f"{p.name}"
                     f"（{region_names[code]}）"
+                )
+
+            elif code in isp_names:
+
+                label = (
+                    f"{p.name}"
+                    f"（{isp_names[code]}）"
                 )
 
             links.append(
@@ -1734,6 +2131,29 @@ def main():
     )
 
     # ========================================================
+    # output.max_nodes_total（可选）
+    #
+    # good 此时已经按"历史中曾成功优先 -> 地区 -> 地址"排好序，
+    # 直接切片即为质量最高的前 N 个，跨地区统一计数。
+    # ========================================================
+
+    max_total = int(
+        CFG["output"].get(
+            "max_nodes_total",
+            0
+        ) or 0
+    )
+
+    if max_total > 0 and len(good) > max_total:
+
+        print(
+            f"[INFO] max_nodes_total={max_total}: "
+            f"trimming {len(good)} -> {max_total}"
+        )
+
+        good = good[:max_total]
+
+    # ========================================================
     # 按地区分组
     # ========================================================
 
@@ -1825,6 +2245,76 @@ def main():
         )
 
     # ========================================================
+    # 按运营商分组：mobile / unicom / telecom
+    #
+    # 直接复用 all_items（已按地区限量之后的最终节点集合），
+    # 按 isp 字段重新分组，输出独立订阅文件，和分地区文件并列。
+    #
+    # 注意：这里的数量上限跟分地区文件用的是同一个
+    # max_nodes_per_region（也就是"每个分类最多 N 个"里的 N），
+    # 不是全局 all.txt 的总数上限——同一批节点，只是按
+    # 运营商这个维度重新切一份、各自最多 maxn 个。
+    #
+    # 节点编号复用同一个 item["_index"]，所以同一节点在
+    # all.txt / 分地区文件 / 分运营商文件里名字完全一致。
+    # ========================================================
+
+    isp_grouped = {}
+
+    for item in all_items:
+
+        isp = item.get(
+            "isp",
+            "OTHER"
+        )
+
+        if isp in (
+            "MOBILE",
+            "UNICOM",
+            "TELECOM"
+        ):
+
+            isp_grouped.setdefault(
+                isp,
+                []
+            ).append(item)
+
+    for isp, items in sorted(
+        isp_grouped.items()
+    ):
+
+        items = items[:maxn]
+
+        if not items:
+            continue
+
+        nodes = [
+            vless_node(
+                item,
+                item["_index"]
+            )
+            for item in items
+        ]
+
+        isp_name = isp.lower()
+
+        write_subscription(
+            OUT / f"{isp_name}.txt",
+            nodes
+        )
+
+        write_clash_yaml(
+            OUT / f"{isp_name}.yaml",
+            items
+        )
+
+        print(
+            f"[INFO] ISP group {isp}: "
+            f"{len(items)} nodes (capped at {maxn}) -> "
+            f"{isp_name}.txt / {isp_name}.yaml"
+        )
+
+    # ========================================================
     # ALL TXT + ALL YAML
     #
     # 两者严格使用同一个 all_items。
@@ -1883,7 +2373,8 @@ def main():
 
     print(
         f"[DONE] history pool "
-        f"{len(new_history)}/{MAX_HISTORY}"
+        f"{len(new_history)}/"
+        f"{CFG.get('history', {}).get('max_pool_size', MAX_HISTORY_DEFAULT)}"
     )
 
     print(
