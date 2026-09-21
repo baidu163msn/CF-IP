@@ -12,7 +12,6 @@ import socket
 import ssl
 import sys
 import time
-import uuid as _uuid
 from pathlib import Path
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -43,22 +42,15 @@ CFG = yaml.safe_load(
 )
 
 MAX_FAILURES = 3
-MAX_HISTORY = 5000
+MAX_HISTORY_DEFAULT = 5000
 
 
 # ============================================================
 # 正则
 # ============================================================
 
-# 地区识别
 REGION_RE = re.compile(
     r"\b(HK|JP|SG|KR|TW|US|DE|CN)\b",
-    re.I
-)
-
-# 运营商识别
-OPERATOR_RE = re.compile(
-    r"\b(CU|CT|CMCC)\b",
     re.I
 )
 
@@ -131,51 +123,33 @@ def region_from_comment(
 
 
 # ============================================================
-# 运营商识别
-#
-# 支持：
-#   CU / CT / CMCC
-#   联通 / 电信 / 移动
-#   中国联通 / 中国电信 / 中国移动
-#   China Unicom / China Telecom / China Mobile
-#
-# 无法识别时：
-#   OTHER
+# 运营商识别（移动 / 联通 / 电信）
 # ============================================================
 
-def operator_from_comment(
-    comment: str,
-    source_name: str
-) -> str:
+ISP_ALIASES = {
+    "中国移动": "CMCC",
+    "移动": "CMCC",
+    "mobile": "CMCC",
+    "cmcc": "CMCC",
 
-    m = OPERATOR_RE.search(comment or "")
+    "中国联通": "CU",
+    "联通": "CU",
+    "unicom": "CU",
+    "cucc": "CU",
 
-    if m:
-        return m.group(1).upper()
+    "中国电信": "CT",
+    "电信": "CT",
+    "telecom": "CT",
+    "ctcc": "CT",
+}
+
+
+def isp_from_comment(comment: str) -> str:
 
     text = (comment or "").lower()
 
-    aliases = {
-        # 联通
-        "联通": "CU",
-        "中国联通": "CU",
-        "china unicom": "CU",
-        "unicom": "CU",
+    for key, value in ISP_ALIASES.items():
 
-        # 电信
-        "电信": "CT",
-        "中国电信": "CT",
-        "china telecom": "CT",
-        "telecom": "CT",
-
-        # 移动
-        "移动": "CMCC",
-        "中国移动": "CMCC",
-        "china mobile": "CMCC",
-        "mobile": "CMCC",
-    }
-
-    for key, value in aliases.items():
         if key in text:
             return value
 
@@ -267,29 +241,20 @@ def parse_line(
     if kind == "domain" and addr_type != "domain":
         return None
 
-    # --------------------------------------------------------
-    # 地区
-    # --------------------------------------------------------
-
     region = region_from_comment(
         comment or "",
         source_name
     )
 
-    # --------------------------------------------------------
-    # 运营商
-    # --------------------------------------------------------
-
-    operator = operator_from_comment(
-        comment or "",
-        source_name
+    isp = isp_from_comment(
+        comment or ""
     )
 
     return {
         "address": address,
         "port": port,
         "region": region,
-        "operator": operator,
+        "isp": isp,
         "comment": comment or "",
         "source": source_name,
         "type": addr_type,
@@ -473,32 +438,26 @@ def load_history():
             clean[str(key)] = {
                 "address": str(address),
                 "port": port,
-
                 "region": item.get(
                     "region",
                     "OTHER"
                 ),
-
-                "operator": item.get(
-                    "operator",
+                "isp": item.get(
+                    "isp",
                     "OTHER"
                 ),
-
                 "comment": item.get(
                     "comment",
                     ""
                 ),
-
                 "source": item.get(
                     "source",
                     "HISTORY"
                 ),
-
                 "type": item.get(
                     "type",
                     "ipv4"
                 ),
-
                 "failures": max(
                     0,
                     int(item.get(
@@ -506,27 +465,22 @@ def load_history():
                         0
                     ))
                 ),
-
                 "first_seen": item.get(
                     "first_seen",
                     utc_now()
                 ),
-
                 "last_seen": item.get(
                     "last_seen",
                     ""
                 ),
-
                 "last_success": item.get(
                     "last_success",
                     ""
                 ),
-
                 "last_failure": item.get(
                     "last_failure",
                     ""
                 ),
-
                 "last_error": item.get(
                     "last_error",
                     ""
@@ -558,7 +512,7 @@ def load_history():
 #   source_current = False
 #
 # 如果历史 IP 又出现在当前源：
-#   更新 source / comment / region / operator
+#   更新 source / comment / region
 # ============================================================
 
 def merge_candidates(
@@ -648,190 +602,203 @@ def merge_candidates(
 
 
 # ============================================================
-# TCP + TLS 测试
+# 真实性检测（WebSocket 升级探测）
+#
+# 单纯的 TLS 握手成功，只能证明这个 IP 上有台机器愿意
+# 完成 TLS 握手（很多 CF 边缘 IP 对谁都会握手成功），
+# 并不能证明它真的把流量转发到了你的后端。
+#
+# 这里在 TLS 之上，按 config.yml 里配置的 path/host，
+# 发一个真实的 HTTP WebSocket 升级请求：
+#   - 如果对端返回 "101 Switching Protocols"，
+#     说明 CDN -> 源站 -> WS 服务这条链路是真的通的。
+#   - 否则（403/404/521/522 等，或者压根没响应），
+#     说明这个 IP 现在并不能真正代理到你的节点。
+#
+# 目前只对 template.type == "ws" 生效；
+# grpc 传输的真实性探测复杂得多，暂不支持，
+# 会退化为只做 TLS 握手检测。
 # ============================================================
 
-def test_mode():
-    """
-    test.mode:
-      tls    只做 TCP + TLS 握手（原有行为）
-      ws     再发一个真实的 WebSocket 升级请求，要求返回 101
-      vless  在 ws 基础上走一次 VLESS，经隧道访问探测地址，要求拿到 HTTP 响应
+# ============================================================
+# gRPC 真实性检测（HTTP/2 探测）
+#
+# gRPC 是跑在 HTTP/2 上的，不能像 WS 那样直接发一段
+# HTTP/1.1 文本就完事，需要真正的 HTTP/2 帧交互。
+#
+# 这里用 h2 库（纯 Python 的 HTTP/2 协议状态机）在已经
+# 建立好的 TLS 连接上：
+#   1. 发送 HTTP/2 连接前言 + SETTINGS
+#   2. 对 serviceName 发一个 POST 请求
+#      （不需要携带合法的 protobuf body/凭据，
+#       只要服务端愿意用 HTTP/2 语义回应，
+#       哪怕是 grpc-status 报错，也说明
+#       CDN -> 源站 -> gRPC 服务这条链路是通的）
+#   3. 读到任何带 :status 的 HEADERS/TRAILERS 帧就算成功
+#
+# 需要 requirements.txt 里安装 h2（h2>=4,<5）。
+# 没装的话，这个函数会抛异常，外层会把该次检测标记为失败，
+# 并在日志里提示装 h2，不会导致整个脚本崩溃。
+# ============================================================
 
-    模板不是 ws（例如 grpc）时，ws / vless 无法使用，退回 tls。
-    """
+def grpc_upgrade_check(
+    ssock,
+    timeout: float
+) -> str:
 
-    mode = str(
-        CFG["test"].get("mode", "tls")
-    ).lower()
+    import h2.connection
+    import h2.events
 
-    if mode not in ("tls", "ws", "vless"):
-        return "tls"
+    t = CFG["template"]
 
-    if str(CFG["template"].get("type", "ws")).lower() != "ws":
-        return "tls"
-
-    return mode
-
-
-def _recv_exact(sock, n):
-
-    buf = b""
-
-    while len(buf) < n:
-
-        chunk = sock.recv(n - len(buf))
-
-        if not chunk:
-            raise ConnectionError("connection closed")
-
-        buf += chunk
-
-    return buf
-
-
-def _ws_upgrade(sock, host, path):
-    """发送 WebSocket 升级请求，返回 HTTP 状态码。"""
-
-    key = base64.b64encode(os.urandom(16)).decode()
-
-    sock.sendall(
-        (
-            f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
-            "User-Agent: Mozilla/5.0\r\n"
-            "Connection: Upgrade\r\n"
-            "Upgrade: websocket\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n\r\n"
-        ).encode()
+    service_name = (
+        t.get("serviceName", "")
+        or "grpc"
     )
 
-    head = b""
-
-    while b"\r\n\r\n" not in head and len(head) < 8192:
-
-        chunk = sock.recv(1024)
-
-        if not chunk:
-            raise ConnectionError("closed during upgrade")
-
-        head += chunk
-
-    m = re.match(rb"HTTP/1\.[01] (\d{3})", head)
-
-    if not m:
-        raise ValueError("not an HTTP response")
-
-    return int(m.group(1))
-
-
-def _ws_frame(payload):
-    """客户端 -> 服务端的 WebSocket 二进制帧（必须带掩码）。"""
-
-    n = len(payload)
-
-    if n < 126:
-        head = bytes([0x82, 0x80 | n])
-    elif n < 65536:
-        head = bytes([0x82, 0x80 | 126]) + n.to_bytes(2, "big")
-    else:
-        head = bytes([0x82, 0x80 | 127]) + n.to_bytes(8, "big")
-
-    mask = os.urandom(4)
-
-    return head + mask + bytes(
-        b ^ mask[i % 4]
-        for i, b in enumerate(payload)
+    conn = h2.connection.H2Connection()
+    conn.initiate_connection()
+    ssock.sendall(
+        conn.data_to_send()
     )
 
+    stream_id = conn.get_next_available_stream_id()
 
-def _ws_read_frame(sock):
+    headers = [
+        (":method", "POST"),
+        (":path", f"/{service_name}/Ping"),
+        (":scheme", "https"),
+        (":authority", t["host"]),
+        ("content-type", "application/grpc"),
+        ("te", "trailers"),
+    ]
 
-    b1, b2 = _recv_exact(sock, 2)
-
-    n = b2 & 0x7F
-
-    if n == 126:
-        n = int.from_bytes(_recv_exact(sock, 2), "big")
-    elif n == 127:
-        n = int.from_bytes(_recv_exact(sock, 8), "big")
-
-    if n > 65536:
-        raise ValueError("frame too large")
-
-    if b2 & 0x80:
-        _recv_exact(sock, 4)
-
-    return b1 & 0x0F, _recv_exact(sock, n)
-
-
-def _vless_probe(sock):
-    """
-    通过 WebSocket 发一个真实的 VLESS 请求，
-    让服务端替我们访问 probe_host，拿到任意 HTTP 状态行即视为成功。
-    """
-
-    cfg = CFG["test"]
-
-    host = str(cfg.get("probe_host", "cp.cloudflare.com"))
-    port = int(cfg.get("probe_port", 80))
-    path = str(cfg.get("probe_path", "/generate_204"))
-
-    addr = host.encode()
-
-    # VLESS 请求头：
-    # 版本(1) + UUID(16) + 附加信息长度(1) + 命令(1=TCP)
-    # + 端口(2) + 地址类型(2=域名) + 域名长度(1) + 域名
-    header = (
-        b"\x00"
-        + _uuid.UUID(CFG["template"]["uuid"]).bytes
-        + b"\x00\x01"
-        + port.to_bytes(2, "big")
-        + b"\x02"
-        + bytes([len(addr)])
-        + addr
+    conn.send_headers(
+        stream_id,
+        headers,
+        end_stream=True
     )
+
+    ssock.sendall(
+        conn.data_to_send()
+    )
+
+    ssock.settimeout(timeout)
+
+    status = ""
+    deadline = time.monotonic() + timeout
+
+    while (
+        not status
+        and time.monotonic() < deadline
+    ):
+
+        try:
+            data = ssock.recv(65536)
+        except socket.timeout:
+            break
+
+        if not data:
+            break
+
+        events = conn.receive_data(data)
+
+        outbound = conn.data_to_send()
+
+        if outbound:
+            ssock.sendall(outbound)
+
+        stream_ended = False
+
+        for event in events:
+
+            headers_list = None
+
+            if isinstance(
+                event,
+                (
+                    h2.events.ResponseReceived,
+                    h2.events.TrailersReceived
+                )
+            ):
+                headers_list = event.headers
+
+            if headers_list:
+
+                for name, value in headers_list:
+
+                    key = (
+                        name.decode()
+                        if isinstance(name, bytes)
+                        else name
+                    )
+
+                    val = (
+                        value.decode()
+                        if isinstance(value, bytes)
+                        else value
+                    )
+
+                    if key == ":status":
+                        status = val
+
+            if isinstance(
+                event,
+                h2.events.StreamEnded
+            ):
+                stream_ended = True
+
+        if stream_ended:
+            break
+
+    return status
+
+
+def ws_upgrade_check(ssock, timeout: float) -> str:
+
+    t = CFG["template"]
+
+    key = base64.b64encode(
+        os.urandom(16)
+    ).decode()
 
     request = (
-        f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}\r\n"
-        "Connection: close\r\n\r\n"
-    ).encode()
+        f"GET {t['path']} HTTP/1.1\r\n"
+        f"Host: {t['host']}\r\n"
+        f"Connection: Upgrade\r\n"
+        f"Upgrade: websocket\r\n"
+        f"Sec-WebSocket-Version: 13\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        f"\r\n"
+    )
 
-    sock.sendall(_ws_frame(header + request))
+    ssock.settimeout(timeout)
+    ssock.sendall(request.encode())
 
-    buf = b""
+    data = ssock.recv(4096)
 
-    for _ in range(8):
+    if not data:
+        return ""
 
-        opcode, data = _ws_read_frame(sock)
+    status_line = data.split(
+        b"\r\n",
+        1
+    )[0].decode(
+        "ascii",
+        "replace"
+    )
 
-        if opcode == 0x8:
-            raise ConnectionError("server closed websocket")
+    return status_line
 
-        if opcode in (0x0, 0x1, 0x2):
-            buf += data
 
-        # 响应头：版本(1) + 附加信息长度(1) + 附加信息
-        if len(buf) >= 2:
-
-            body = buf[2 + buf[1]:]
-
-            m = re.match(rb"HTTP/1\.[01] (\d{3})", body)
-
-            if m:
-                return int(m.group(1))
-
-    raise ValueError("no HTTP response through tunnel")
-
+# ============================================================
+# TCP + TLS 测试
+# ============================================================
 
 def tcp_tls_test(item):
 
     host = item["address"]
     port = item["port"]
-
-    t = CFG["template"]
 
     timeout = float(
         CFG["test"]["connect_timeout"]
@@ -840,39 +807,6 @@ def tcp_tls_test(item):
     tls_timeout = float(
         CFG["test"]["tls_timeout"]
     )
-
-    probe_timeout = float(
-        CFG["test"].get("probe_timeout", 6.0)
-    )
-
-    mode = test_mode()
-
-    # 是否校验证书由 config.yml 的 test.tls_verify 控制
-    # 默认 False：只验证 TLS 握手是否成功（CF 边缘 IP 场景常见做法）
-    verify = bool(
-        CFG["test"].get(
-            "tls_verify",
-            False
-        )
-    )
-
-    # SSL 上下文在计时之前创建：
-    # 加载系统根证书很耗时，不能算进延迟里。
-    if verify:
-
-        ctx = ssl.create_default_context()
-
-    else:
-
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
-    # WebSocket 只能走 HTTP/1.1
-    if mode != "tls":
-        ctx.set_alpn_protocols(["http/1.1"])
-
-    start = time.perf_counter()
 
     try:
 
@@ -883,57 +817,161 @@ def tcp_tls_test(item):
 
             sock.settimeout(tls_timeout)
 
+            ctx = ssl.create_default_context()
+
+            # 是否校验证书由 config.yml 的 test.tls_verify 控制
+            # 默认 False：只验证 TLS 握手是否成功（CF 边缘 IP 场景常见做法）
+            verify = bool(
+                CFG["test"].get(
+                    "tls_verify",
+                    False
+                )
+            )
+
+            if not verify:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+
+            # gRPC 真实性检测需要协商到 h2；
+            # 同时保留 http/1.1 以免影响 WS 场景。
+            try:
+                ctx.set_alpn_protocols(
+                    ["h2", "http/1.1"]
+                )
+            except NotImplementedError:
+                pass
+
             with ctx.wrap_socket(
                 sock,
-                server_hostname=t["sni"]
+                server_hostname=CFG[
+                    "template"
+                ]["sni"]
             ) as ssock:
 
-                version = ssock.version() or ""
-
-                if mode == "tls":
-
-                    return (
-                        True,
-                        version,
-                        round(
-                            (time.perf_counter() - start) * 1000
-                        )
-                    )
-
-                ssock.settimeout(probe_timeout)
-
-                status = _ws_upgrade(
-                    ssock,
-                    t["host"],
-                    t["path"]
+                tls_version = (
+                    ssock.version() or ""
                 )
 
-                if status != 101:
+                # ================================================
+                # test.real_check
+                #
+                # 打开后，TLS 握手成功只是第一步，
+                # 还要求 WebSocket 升级请求得到 101 响应，
+                # 才认为这个节点真正可用。
+                # ================================================
+
+                real_check = bool(
+                    CFG["test"].get(
+                        "real_check",
+                        False
+                    )
+                )
+
+                transport_type = str(
+                    CFG["template"].get(
+                        "type",
+                        ""
+                    )
+                ).lower()
+
+                if not real_check or transport_type not in (
+                    "ws",
+                    "grpc"
+                ):
+                    return True, tls_version
+
+                real_timeout = float(
+                    CFG["test"].get(
+                        "real_check_timeout",
+                        tls_timeout
+                    )
+                )
+
+                # ------------------------------------------------
+                # WebSocket：发 HTTP/1.1 升级请求，期望 101
+                # ------------------------------------------------
+
+                if transport_type == "ws":
+
+                    try:
+
+                        status_line = ws_upgrade_check(
+                            ssock,
+                            real_timeout
+                        )
+
+                    except Exception as e:
+
+                        return (
+                            False,
+                            f"ws-check-error: {e}"
+                        )
+
+                    if "101" in status_line:
+
+                        return (
+                            True,
+                            f"{tls_version} | {status_line}"
+                        )
 
                     return (
                         False,
-                        f"ws upgrade: HTTP {status}",
-                        None
+                        f"ws-check-rejected: "
+                        f"{status_line or '(no response)'}"
                     )
 
-                # 延迟只算到 WebSocket 升级完成，
-                # 不含 VLESS 探测（那一段主要是服务端出网耗时）
-                latency = round(
-                    (time.perf_counter() - start) * 1000
+                # ------------------------------------------------
+                # gRPC：需要先协商到 h2，再发真实的 HTTP/2 请求
+                # ------------------------------------------------
+
+                alpn = ssock.selected_alpn_protocol()
+
+                if alpn != "h2":
+
+                    return (
+                        False,
+                        f"grpc-check-rejected: "
+                        f"ALPN negotiated '{alpn}', expected h2"
+                    )
+
+                try:
+
+                    status = grpc_upgrade_check(
+                        ssock,
+                        real_timeout
+                    )
+
+                except ImportError:
+
+                    return (
+                        False,
+                        "grpc-check-error: "
+                        "h2 library not installed "
+                        "(add 'h2' to requirements.txt)"
+                    )
+
+                except Exception as e:
+
+                    return (
+                        False,
+                        f"grpc-check-error: {e}"
+                    )
+
+                if status:
+
+                    return (
+                        True,
+                        f"{tls_version} | grpc:{status}"
+                    )
+
+                return (
+                    False,
+                    "grpc-check-rejected: (no response)"
                 )
-
-                if mode == "vless":
-                    _vless_probe(ssock)
-
-                return True, version, latency
 
     except Exception as e:
 
-        return (
-            False,
-            f"{type(e).__name__}: {e}",
-            None
-        )
+        return False, str(e)
 
 
 # ============================================================
@@ -962,7 +1000,6 @@ def test_candidates(items):
 
             item["health_ok"] = True
             item["tls"] = ""
-            item["latency_ms"] = None
             item["test_error"] = ""
             item["tested"] = False
             item["test_time"] = now
@@ -988,22 +1025,6 @@ def test_candidates(items):
     # 如果源站数据本身质量不高，可能会包含失效 IP。
     # ========================================================
 
-    configured_mode = str(
-        CFG["test"].get("mode", "tls")
-    ).lower()
-
-    mode = test_mode()
-
-    if mode != configured_mode:
-
-        print(
-            f"[WARN] test.mode={configured_mode} is not usable "
-            f"with template type "
-            f"{CFG['template'].get('type')!r}; using {mode}"
-        )
-
-    print(f"[INFO] health check mode: {mode}")
-
     skip_ipv6 = bool(
         CFG["test"].get(
             "skip_ipv6_test",
@@ -1022,7 +1043,6 @@ def test_candidates(items):
 
                 item["health_ok"] = True
                 item["tls"] = ""
-                item["latency_ms"] = None
                 item["test_error"] = ""
                 item["tested"] = False
                 item["test_time"] = now
@@ -1057,7 +1077,6 @@ def test_candidates(items):
 
     passed = 0
     failed = 0
-    reasons = {}
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=workers
@@ -1079,13 +1098,12 @@ def test_candidates(items):
 
             try:
 
-                ok, detail, latency = future.result()
+                ok, detail = future.result()
 
             except Exception as e:
 
                 ok = False
                 detail = str(e)
-                latency = None
 
             item["tested"] = True
             item["test_time"] = now
@@ -1094,7 +1112,6 @@ def test_candidates(items):
 
                 item["health_ok"] = True
                 item["tls"] = detail
-                item["latency_ms"] = latency
                 item["test_error"] = ""
 
                 passed += 1
@@ -1103,14 +1120,9 @@ def test_candidates(items):
 
                 item["health_ok"] = False
                 item["tls"] = ""
-                item["latency_ms"] = None
                 item["test_error"] = detail
 
                 failed += 1
-
-                reasons[detail[:60]] = (
-                    reasons.get(detail[:60], 0) + 1
-                )
 
     print(
         f"[HEALTH] passed={passed}, "
@@ -1118,13 +1130,78 @@ def test_candidates(items):
         f"total={len(to_test)}"
     )
 
-    # 失败原因 Top 5，方便判断是节点问题还是配置问题
-    for reason, count in sorted(
-        reasons.items(),
-        key=lambda x: -x[1]
-    )[:5]:
+    # ========================================================
+    # 失败原因诊断
+    #
+    # 只打印 passed/failed 数字，出问题时完全没法排查。
+    # 这里把失败原因按类型聚合打印出来，尤其是分清楚：
+    #   - "ws-check-rejected" / "grpc-check-rejected"
+    #     -> TLS 握手是通的，但真实性探测被拒绝
+    #       （最可能是 template.path/host/sni 配置和
+    #        实际后端不匹配，而不是这些 IP 真的不可用）
+    #   - 其它错误（连接超时、拒绝连接等）
+    #     -> 更像是 IP 本身确实不可用
+    #
+    # 如果 real_check 开着、且失败率非常高，多半是配置问题，
+    # 而不是"这些 CF IP 突然全部失效了"，这里给出明确提示，
+    # 避免每次都要靠猜。
+    # ========================================================
 
-        print(f"[HEALTH]   {count:>5} x {reason}")
+    if failed:
+
+        reject_count = 0
+        other_fail_count = 0
+        sample_errors = []
+
+        for item in to_test:
+
+            if item.get("health_ok"):
+                continue
+
+            err = item.get("test_error", "")
+
+            if (
+                "ws-check-rejected" in err
+                or "grpc-check-rejected" in err
+            ):
+                reject_count += 1
+            else:
+                other_fail_count += 1
+
+            if err and len(sample_errors) < 5 and err not in sample_errors:
+                sample_errors.append(err)
+
+        print(
+            f"[HEALTH] failure breakdown: "
+            f"real-check-rejected={reject_count}, "
+            f"other-errors={other_fail_count}"
+        )
+
+        for err in sample_errors:
+            print(f"[HEALTH]   sample error: {err}")
+
+        real_check_on = bool(
+            CFG["test"].get(
+                "real_check",
+                False
+            )
+        )
+
+        if (
+            real_check_on
+            and len(to_test) > 0
+            and reject_count / len(to_test) > 0.8
+        ):
+
+            print(
+                "[WARN] 超过 80% 的候选都是被真实性检测(real_check)拒绝的，"
+                "而不是连接失败。这通常意味着 config.yml 里的 "
+                "template.path / template.host / template.sni "
+                "和你后端实际的 WS/gRPC 配置对不上，"
+                "而不是这批 Cloudflare IP 真的大量失效。"
+                "建议先确认后端配置，或临时把 test.real_check "
+                "设为 false 验证一下。"
+            )
 
     return items
 
@@ -1172,32 +1249,26 @@ def update_history(
             record = {
                 "address": item["address"],
                 "port": item["port"],
-
                 "region": item.get(
                     "region",
                     "OTHER"
                 ),
-
-                "operator": item.get(
-                    "operator",
+                "isp": item.get(
+                    "isp",
                     "OTHER"
                 ),
-
                 "comment": item.get(
                     "comment",
                     ""
                 ),
-
                 "source": item.get(
                     "source",
                     "HISTORY"
                 ),
-
                 "type": item.get(
                     "type",
                     "ipv4"
                 ),
-
                 "failures": 0,
                 "first_seen": now,
                 "last_seen": "",
@@ -1212,10 +1283,7 @@ def update_history(
 
             record = dict(old)
 
-            # ------------------------------------------------
             # 当前源出现时更新元数据
-            # ------------------------------------------------
-
             if item.get(
                 "source_current",
                 False
@@ -1229,10 +1297,10 @@ def update_history(
                     )
                 )
 
-                record["operator"] = item.get(
-                    "operator",
+                record["isp"] = item.get(
+                    "isp",
                     record.get(
-                        "operator",
+                        "isp",
                         "OTHER"
                     )
                 )
@@ -1261,10 +1329,7 @@ def update_history(
                     )
                 )
 
-        # ----------------------------------------------------
         # 当前源中出现
-        # ----------------------------------------------------
-
         if item.get(
             "source_current",
             False
@@ -1395,7 +1460,17 @@ def history_sort_key(item):
 
 def limit_history(history):
 
-    if len(history) <= MAX_HISTORY:
+    max_history = int(
+        CFG.get(
+            "history",
+            {}
+        ).get(
+            "max_pool_size",
+            MAX_HISTORY_DEFAULT
+        )
+    )
+
+    if len(history) <= max_history:
 
         return history, 0
 
@@ -1411,13 +1486,13 @@ def limit_history(history):
     )
 
     kept = dict(
-        records[:MAX_HISTORY]
+        records[:max_history]
     )
 
     removed = len(history) - len(kept)
 
     print(
-        f"[HISTORY] limit {MAX_HISTORY}: "
+        f"[HISTORY] limit {max_history}: "
         f"removed {removed} oldest/weak entries"
     )
 
@@ -1430,20 +1505,13 @@ def limit_history(history):
 
 def vless_node(
     item,
-    index,
-    group=None
+    index
 ):
 
     t = CFG["template"]
 
-    # --------------------------------------------------------
-    # group 未指定时，继续使用原来的地区
-    # --------------------------------------------------------
-
-    group = group or item["region"]
-
     name = CFG["output"]["naming"].format(
-        REGION=group,
+        REGION=item["region"],
         INDEX=index
     )
 
@@ -1540,20 +1608,13 @@ def write_subscription(
 
 def clash_proxy(
     item,
-    index,
-    group=None
+    index
 ):
 
     t = CFG["template"]
 
-    # --------------------------------------------------------
-    # group 未指定时，继续使用原来的地区
-    # --------------------------------------------------------
-
-    group = group or item["region"]
-
     name = CFG["output"]["naming"].format(
-        REGION=group,
+        REGION=item["region"],
         INDEX=index
     )
 
@@ -1664,17 +1725,13 @@ def clash_proxy(
 
 def write_clash_yaml(
     path: Path,
-    items,
-    group=None
+    items
 ):
 
-    # 节点自带 _group（如 CMCC）时优先用它命名，
-    # 这样 all.yaml 里可以同时放地区节点和运营商节点。
     proxies = [
         clash_proxy(
             item,
-            item["_index"],
-            group=item.get("_group") or group
+            item["_index"]
         )
         for item in items
     ]
@@ -1713,6 +1770,15 @@ def write_index(history_stats=None):
         {}
     )
 
+    # 运营商中文对照表（mobile/unicom/telecom.txt 用）
+    isp_names = CFG.get(
+        "output",
+        {}
+    ).get(
+        "isp_names",
+        {}
+    )
+
     links = []
 
     for p in files:
@@ -1731,6 +1797,13 @@ def write_index(history_stats=None):
                 label = (
                     f"{p.name}"
                     f"（{region_names[code]}）"
+                )
+
+            elif code in isp_names:
+
+                label = (
+                    f"{p.name}"
+                    f"（{isp_names[code]}）"
                 )
 
             links.append(
@@ -1781,7 +1854,7 @@ def write_index(history_stats=None):
         + "</ul>"
         + extra_html
         + "</body>"
-        + "</html>"
+        "</html>"
     )
 
     (
@@ -2099,17 +2172,14 @@ def main():
     # ========================================================
     # 排序
     #
-    # 1. 延迟最低的优先（每个分类截取前 max_nodes_per_region 个）
-    #    没有测过延迟的（IPv6 跳过测试等）排在所有测过的后面
-    # 2. 延迟相同时，历史中已经成功过的 IP 优先
+    # 历史中已经成功过的 IP 优先，
+    # 其次当前源中新发现的 IP。
+    #
+    # 这样历史 IP 不会因为新源数据刷新而频繁被替换。
     # ========================================================
 
     good.sort(
         key=lambda item: (
-            item["latency_ms"]
-            if item.get("latency_ms") is not None
-            else float("inf"),
-
             0
             if item.get(
                 "history_key"
@@ -2134,13 +2204,30 @@ def main():
     )
 
     # ========================================================
+    # output.max_nodes_total（可选）
+    #
+    # good 此时已经按"历史中曾成功优先 -> 地区 -> 地址"排好序，
+    # 直接切片即为质量最高的前 N 个，跨地区统一计数。
+    # ========================================================
+
+    max_total = int(
+        CFG["output"].get(
+            "max_nodes_total",
+            0
+        ) or 0
+    )
+
+    if max_total > 0 and len(good) > max_total:
+
+        print(
+            f"[INFO] max_nodes_total={max_total}: "
+            f"trimming {len(good)} -> {max_total}"
+        )
+
+        good = good[:max_total]
+
+    # ========================================================
     # 按地区分组
-    #
-    # 原有逻辑保持不变：
-    #
-    # HK / JP / SG / KR / TW / US / DE / CN / OTHER
-    #
-    # 运营商分组是额外输出，不替代这里。
     # ========================================================
 
     grouped = {}
@@ -2151,44 +2238,6 @@ def main():
             item["region"],
             []
         ).append(item)
-
-    # ========================================================
-    # 按运营商分组
-    #
-    # 这是新增功能：
-    #
-    # CU   = 联通
-    # CT   = 电信
-    # CMCC = 移动
-    #
-    # 注意：
-    # 一个节点可以同时出现在：
-    #
-    #   other.yaml
-    #   cmcc.yaml
-    #
-    # 在 all.txt / all.yaml 里，这些节点只保留运营商名称那一份。
-    # ========================================================
-
-    operator_grouped = {}
-
-    for item in good:
-
-        operator = item.get(
-            "operator",
-            "OTHER"
-        )
-
-        if operator in (
-            "CU",
-            "CT",
-            "CMCC"
-        ):
-
-            operator_grouped.setdefault(
-                operator,
-                []
-            ).append(item)
 
     # ========================================================
     # 最终节点
@@ -2269,154 +2318,87 @@ def main():
         )
 
     # ========================================================
-    # 按运营商生成 CU / CT / CMCC TXT + YAML
+    # 按运营商分组：mobile / unicom / telecom
     #
-    # 运营商文件是额外筛选订阅：
+    # 直接复用 all_items（已按地区限量之后的最终节点集合），
+    # 按 isp 字段重新分组，输出独立订阅文件，和分地区文件并列。
     #
-    #   cu.txt
-    #   cu.yaml
+    # 注意：这里的数量上限跟分地区文件用的是同一个
+    # max_nodes_per_region（也就是"每个分类最多 N 个"里的 N），
+    # 不是全局 all.txt 的总数上限——同一批节点，只是按
+    # 运营商这个维度重新切一份、各自最多 maxn 个。
     #
-    #   ct.txt
-    #   ct.yaml
-    #
-    #   cmcc.txt
-    #   cmcc.yaml
-    #
-    # 这些节点用运营商名称编号（CMCC-1 等），
-    # 会单独并入 all.txt / all.yaml。
+    # 节点编号复用同一个 item["_index"]，所以同一节点在
+    # all.txt / 分地区文件 / 分运营商文件里名字完全一致。
     # ========================================================
 
-    # 收集运营商文件里的节点（名称如 CMCC-1），供 all 汇总
-    operator_items_all = []
+    isp_grouped = {}
 
-    # 已经进入运营商文件的节点（原始对象的 id）。
-    # all 里这些节点只保留运营商名称那一份，不再保留地区名称的那份。
-    operator_selected_ids = set()
+    for item in all_items:
 
-    for operator, items in sorted(
-        operator_grouped.items()
+        isp = item.get(
+            "isp",
+            "OTHER"
+        )
+
+        if isp in (
+            "CMCC",
+            "CU",
+            "CT"
+        ):
+
+            isp_grouped.setdefault(
+                isp,
+                []
+            ).append(item)
+
+    for isp, items in sorted(
+        isp_grouped.items()
     ):
 
-        # 每个运营商最多 max_nodes_per_region
         items = items[:maxn]
 
         if not items:
             continue
 
-        operator_selected_ids.update(
-            id(item)
-            for item in items
-        )
-
         nodes = [
             vless_node(
                 item,
-                index,
-                group=operator
+                item["_index"]
             )
-            for index, item in enumerate(
-                items,
-                1
-            )
+            for item in items
         ]
 
-        operator_name = operator.lower()
-
-        # ----------------------------------------------------
-        # TXT
-        # ----------------------------------------------------
+        isp_name = isp.lower()
 
         write_subscription(
-            OUT / f"{operator_name}.txt",
+            OUT / f"{isp_name}.txt",
             nodes
         )
 
-        # ----------------------------------------------------
-        # YAML
-        # ----------------------------------------------------
-
-        # 这里不能使用地区生成时留下的 _index，
-        # 运营商文件自己从 1 开始编号。
-        #
-        # clash_proxy() 使用 group=operator，
-        # 所以名称会是：
-        #
-        #   CU-1
-        #   CT-1
-        #   CMCC-1
-        #
-        operator_items = []
-
-        for index, item in enumerate(
-            items,
-            1
-        ):
-
-            temp_item = dict(item)
-            temp_item["_index"] = index
-            temp_item["_group"] = operator
-            operator_items.append(
-                temp_item
-            )
-
         write_clash_yaml(
-            OUT / f"{operator_name}.yaml",
-            operator_items,
-            group=operator
+            OUT / f"{isp_name}.yaml",
+            items
         )
 
-        operator_items_all.extend(operator_items)
+        print(
+            f"[INFO] ISP group {isp}: "
+            f"{len(items)} nodes (capped at {maxn}) -> "
+            f"{isp_name}.txt / {isp_name}.yaml"
+        )
 
     # ========================================================
     # ALL TXT + ALL YAML
     #
-    # 两者内容一致：地区节点（去掉已在运营商文件里的） + 运营商节点。
-    # 每个 IP 只出现一次。
+    # 两者严格使用同一个 all_items。
     # ========================================================
-
-    # 地区节点里去掉已经进入运营商文件的（避免同一个 IP 出现两次）。
-    # 编号沿用地区文件里的编号，所以会有空缺，但名称与 hk.yaml 等保持一致。
-    all_region_items = [
-        item
-        for item in all_items
-        if id(item) not in operator_selected_ids
-    ]
-
-    # all 汇总：剩余的地区节点 + 运营商文件的节点（CMCC-01 / CT-01 / CU-01）
-    all_final = all_region_items + operator_items_all
-
-    # output.max_nodes_total：all.txt / all.yaml 的总数硬上限。
-    # 0（默认）表示不限制，此时 all 就是各分类结果的并集。
-    max_total = int(
-        CFG["output"].get("max_nodes_total", 0) or 0
-    )
-
-    if max_total > 0 and len(all_final) > max_total:
-
-        def latency_of(i):
-
-            v = all_final[i].get("latency_ms")
-
-            return float("inf") if v is None else v
-
-        # 保留延迟最低的 max_total 个，输出顺序不变
-        keep = sorted(
-            range(len(all_final)),
-            key=latency_of
-        )[:max_total]
-
-        all_final = [
-            all_final[i]
-            for i in sorted(keep)
-        ]
 
     all_nodes = [
         vless_node(
             item,
-            item["_index"],
-            group=item.get("_group")
+            item["_index"]
         )
-        for item in all_final
+        for item in all_items
     ]
 
     if not all_nodes:
@@ -2434,7 +2416,7 @@ def main():
 
     write_clash_yaml(
         OUT / "all.yaml",
-        all_final
+        all_items
     )
 
     # ========================================================
@@ -2459,35 +2441,14 @@ def main():
 
     print(
         f"[DONE] generated "
-        f"{len(all_final)} Mihomo proxies"
+        f"{len(all_items)} Mihomo proxies"
     )
 
     print(
         f"[DONE] history pool "
-        f"{len(new_history)}/{MAX_HISTORY}"
+        f"{len(new_history)}/"
+        f"{CFG.get('history', {}).get('max_pool_size', MAX_HISTORY_DEFAULT)}"
     )
-
-    # --------------------------------------------------------
-    # 运营商统计
-    # --------------------------------------------------------
-
-    for operator in (
-        "CU",
-        "CT",
-        "CMCC"
-    ):
-
-        count = len(
-            operator_grouped.get(
-                operator,
-                []
-            )
-        )
-
-        print(
-            f"[DONE] {operator}: "
-            f"{count} healthy nodes"
-        )
 
     print(
         "============================================================"
