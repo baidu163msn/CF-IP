@@ -1,5 +1,6 @@
 # cf-vless-generator
-# 所有可变参数集中在这里，GitHub Actions / Python 无需修改。
+# 地区别名 + 地区历史备用池优化版
+
 sources:
   - name: LT-V4
     url: https://raw.githubusercontent.com/love-ztm/cfip/refs/heads/main/ubest_ips.txt
@@ -17,10 +18,7 @@ template:
   insecure: 0
   host: "b.0246.us.ci"
   fp: "chrome"
-  # type: ws | grpc（其它值会退化为不带专属参数的通用 VLESS 链接）
   type: "ws"
-  # 仅在 type: grpc 时生效，对应 VLESS 链接里的 serviceName
-  # 以及 Mihomo 的 grpc-opts.grpc-service-name
   serviceName: ""
   allowInsecure: 0
   sni: "b.0246.us.ci"
@@ -30,50 +28,32 @@ test:
   connect_timeout: 3.0
   tls_timeout: 4.0
   concurrency: 40
-  # true：健康检查时按标准 TLS 流程校验证书（对 SNI 域名做正常验证）
-  # false（默认）：只要求 TLS 握手成功，不校验证书——
-  #   适合"借用 Cloudflare 边缘 IP 做 SNI 前置"的场景，
-  #   因为边缘 IP 本身不会持有 sni 对应域名的证书。
   tls_verify: false
-  # GitHub 托管 Runner（ubuntu-latest）默认没有公网 IPv6 出网能力，
-  # 会导致所有 IPv6 候选在健康检查阶段必然失败、永远进不了订阅。
-  # 打开这项后，IPv6 候选跳过真实连接测试，直接信任源站数据。
-  # 注意：这意味着 IPv6 节点完全没有被验证过是否存活。
   skip_ipv6_test: true
-  # 在 TLS 握手成功之后，再做一次真实的应用层探测才算健康：
-  #   - type: ws   -> 发送真实的 WebSocket 升级请求，要求返回 101
-  #   - type: grpc -> ALPN 协商到 h2 后发送真实的 HTTP/2 请求，
-  #                   拿到任意带 :status 的响应就算通
-  # 能过滤掉"TLS 能握手但实际没转发到后端"的假节点。
-  # grpc 检测依赖 h2 库，记得在 requirements.txt 里加上 h2。
   real_check: true
-  # 应用层探测的超时时间（秒）；不填则退回使用 tls_timeout
   real_check_timeout: 5.0
 
 history:
-  # 历史 IP 池（data/ip_history.json）的数量上限。超过时按
-  # "健康优先、最近成功优先"淘汰多余的记录，避免历史文件
-  # 越滚越大、里面躺着一堆早就失效的旧记录。
-  max_pool_size: 30
+  max_pool_size: 60
+  max_failures: 3
+
+  # 地区最低备用库存。历史池满时先保这些地区，再用剩余名额补齐。
+  min_nodes_per_region:
+    HK: 2
+    JP: 2
+    SG: 2
+    KR: 2
+    TW: 2
+    US: 2
+    DE: 2
 
 output:
-  # true：首页会额外显示"观察中、未连续失败 3 次"的历史 IP 数量
-  #   （仅展示统计数字，这些 IP 不会进入任何订阅文件）
   keep_failed: false
-  # false：即使某个源的 kind 是 domain，也全局跳过域名类候选，
-  #   只保留 IP 类型的节点
   include_domain_source: true
-  # 每个"分类"最多保留多少个节点——这里的分类包括：
-  #   每个地区文件（hk.txt / jp.txt / ...）
-  #   每个运营商文件（mobile.txt / unicom.txt / telecom.txt）
-  # 各自独立计数到这个数字，互不影响。
   max_nodes_per_region: 10
-  # 可选：如果还想再加一个"全部订阅（all.txt/all.yaml）总数"
-  # 的硬上限，可以在这里设置一个 >0 的数字；
-  # 设为 0（默认）表示 all.txt 就是各分类结果的并集，不再额外限制。
   max_nodes_total: 0
   naming: "{REGION}-{INDEX:02d}"
-  # 首页展示用的中文地区名；不影响节点命名/订阅内容
+
   regions:
     HK: "香港"
     JP: "日本"
@@ -84,8 +64,88 @@ output:
     DE: "德国"
     CN: "中国"
     OTHER: "其他"
-  # 首页展示用的运营商中文名；不影响节点命名/订阅内容
+
   isp_names:
     CMCC: "中国移动"
     CU: "中国联通"
     CT: "中国电信"
+
+# 明确的数据中心/机场代码映射。
+# 不做模糊 GeoIP 推断；以后遇到新代码可以继续增加。
+region_aliases:
+  HK:
+    - HK
+    - HKG
+    - Hong Kong
+    - 香港
+
+  JP:
+    - JP
+    - JPN
+    - NRT
+    - HND
+    - TYO
+    - KIX
+    - OSA
+    - Japan
+    - 日本
+
+  SG:
+    - SG
+    - SGP
+    - SIN
+    - Singapore
+    - 新加坡
+
+  KR:
+    - KR
+    - KOR
+    - ICN
+    - SEL
+    - GMP
+    - Korea
+    - 韩国
+
+  TW:
+    - TW
+    - TWN
+    - TPE
+    - Taiwan
+    - 台湾
+
+  US:
+    - US
+    - USA
+    - LAX
+    - SFO
+    - SEA
+    - ORD
+    - DFW
+    - ATL
+    - IAD
+    - EWR
+    - JFK
+    - MIA
+    - DEN
+    - PHX
+    - LAS
+    - PDX
+    - United States
+    - 美国
+
+  DE:
+    - DE
+    - DEU
+    - FRA
+    - BER
+    - MUC
+    - DUS
+    - HAM
+    - Germany
+    - 德国
+
+  CN:
+    - CN
+    - CHN
+    - China
+    - 中国
