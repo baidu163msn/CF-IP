@@ -1,11 +1,8 @@
 # cf-vless-generator
 # 所有可变参数集中在这里，GitHub Actions / Python 无需修改。
 sources:
-  - name: YD-V4
-    url: https://raw.githubusercontent.com/svip-s/cloudflare_ip/refs/heads/main/best_ips.txt
-    kind: ip
-  - name: YD-V6
-    url: https://bestcf.pages.dev/vvhan/ipv6.txt
+  - name: LT-V4
+    url: https://raw.githubusercontent.com/love-ztm/cfip/refs/heads/main/ubest_ips.txt
     kind: ip
 
 template:
