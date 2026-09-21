@@ -64,11 +64,11 @@ output:
   #   每个地区文件（hk.txt / jp.txt / ...）
   #   每个运营商文件（mobile.txt / unicom.txt / telecom.txt）
   # 各自独立计数到这个数字，互不影响。
-  max_nodes_per_region: 30
+  max_nodes_per_region: 20
   # 可选：如果还想再加一个"全部订阅（all.txt/all.yaml）总数"
   # 的硬上限，可以在这里设置一个 >0 的数字；
   # 设为 0（默认）表示 all.txt 就是各分类结果的并集，不再额外限制。
-  max_nodes_total: 0
+  max_nodes_total: 100
   naming: "{REGION}-{INDEX:03d}"
   # 首页展示用的中文地区名；不影响节点命名/订阅内容
   regions:
