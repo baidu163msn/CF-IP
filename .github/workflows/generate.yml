@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
   schedule:
     # GitHub Actions 使用 UTC
-    # 每天 UTC 00:14 与 12:14 各执行一次（北京时间 08:14 / 20:14）
     - cron: '14 5,11,23 * * *'
   push:
     paths:
