@@ -855,12 +855,23 @@ def tcp_tls_test(item):
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
 
-            # gRPC 真实性检测需要协商到 h2；
-            # 同时保留 http/1.1 以免影响 WS 场景。
+            # ALPN 必须和真实客户端的传输方式一致：
+            #   grpc          -> 只提供 h2
+            #   ws / 其他     -> 只提供 http/1.1
+            #
+            # 以前同时提供 ["h2", "http/1.1"]：支持 h2 的服务端
+            # （Cloudflare 边缘就是）会选 h2，而 WS 探测发的是
+            # HTTP/1.1 文本，必然被拒绝，导致所有真正的 CF 边缘节点
+            # 都被误判为失败，只剩没做测试的 IPv6 节点。
+            if str(
+                CFG["template"].get("type", "")
+            ).lower() == "grpc":
+                alpn_offer = ["h2"]
+            else:
+                alpn_offer = ["http/1.1"]
+
             try:
-                ctx.set_alpn_protocols(
-                    ["h2", "http/1.1"]
-                )
+                ctx.set_alpn_protocols(alpn_offer)
             except NotImplementedError:
                 pass
 
