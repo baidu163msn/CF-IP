@@ -7,7 +7,7 @@ sources:
 
 template:
   uuid: "2a2038c5-a62c-4f59-af4f-733426d37193"
-  path: "/vl/d8pzhrVA8I87OAFX4yA?ed=2560"
+  path: "/vl/jQsuRDqw1EIbHAHo2xsZGsHFg?ed=2560"
   security: "tls"
   alpn: "http/1.1"
   encryption: "none"
