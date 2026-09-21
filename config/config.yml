@@ -4,9 +4,6 @@ sources:
   - name: LT-V4
     url: https://raw.githubusercontent.com/love-ztm/cfip/refs/heads/main/ubest_ips.txt
     kind: ip
-  - name: SW-V4
-    url: https://bestcf.pages.dev/vvhan/ipv4.txt
-    kind: ip
   - name: SW-V6
     url: https://bestcf.pages.dev/vvhan/ipv6.txt
     kind: ip
