@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # GitHub Actions 使用 UTC
-    - cron: '14 5,11,23 * * *'
+    - cron: '14 23,3,7,11,15,19 * * *'
   push:
     paths:
       # 注意：必须带 ** 才能匹配目录下的所有文件，
