@@ -144,7 +144,27 @@ ISP_ALIASES = {
 }
 
 
+# 备注里直接写 CU / CT / CMCC 这类短码（和地区码 HK / JP 一样）
+ISP_CODE_RE = re.compile(
+    r"\b(CMCC|CUCC|CU|CTCC|CT)\b",
+    re.I
+)
+
+ISP_CODE_MAP = {
+    "CMCC": "CMCC",
+    "CUCC": "CU",
+    "CU": "CU",
+    "CTCC": "CT",
+    "CT": "CT",
+}
+
+
 def isp_from_comment(comment: str) -> str:
+
+    m = ISP_CODE_RE.search(comment or "")
+
+    if m:
+        return ISP_CODE_MAP[m.group(1).upper()]
 
     text = (comment or "").lower()
 
@@ -442,9 +462,12 @@ def load_history():
                     "region",
                     "OTHER"
                 ),
-                "isp": item.get(
-                    "isp",
-                    "OTHER"
+                # 旧版本历史里这个字段叫 operator，这里兼容读取，
+                # 否则历史节点会全部退回 OTHER，运营商分类就丢了。
+                "isp": (
+                    item.get("isp")
+                    or item.get("operator")
+                    or "OTHER"
                 ),
                 "comment": item.get(
                     "comment",
@@ -1505,13 +1528,15 @@ def limit_history(history):
 
 def vless_node(
     item,
-    index
+    index,
+    group=None
 ):
 
     t = CFG["template"]
 
+    # group 不为空时用它做前缀（如 CMCC-01），否则用地区
     name = CFG["output"]["naming"].format(
-        REGION=item["region"],
+        REGION=group or item["region"],
         INDEX=index
     )
 
@@ -1608,13 +1633,14 @@ def write_subscription(
 
 def clash_proxy(
     item,
-    index
+    index,
+    group=None
 ):
 
     t = CFG["template"]
 
     name = CFG["output"]["naming"].format(
-        REGION=item["region"],
+        REGION=group or item["region"],
         INDEX=index
     )
 
@@ -1728,10 +1754,12 @@ def write_clash_yaml(
     items
 ):
 
+    # 节点自带 _group（如 CMCC）时用它命名
     proxies = [
         clash_proxy(
             item,
-            item["_index"]
+            item["_index"],
+            group=item.get("_group")
         )
         for item in items
     ]
@@ -2204,29 +2232,6 @@ def main():
     )
 
     # ========================================================
-    # output.max_nodes_total（可选）
-    #
-    # good 此时已经按"历史中曾成功优先 -> 地区 -> 地址"排好序，
-    # 直接切片即为质量最高的前 N 个，跨地区统一计数。
-    # ========================================================
-
-    max_total = int(
-        CFG["output"].get(
-            "max_nodes_total",
-            0
-        ) or 0
-    )
-
-    if max_total > 0 and len(good) > max_total:
-
-        print(
-            f"[INFO] max_nodes_total={max_total}: "
-            f"trimming {len(good)} -> {max_total}"
-        )
-
-        good = good[:max_total]
-
-    # ========================================================
     # 按地区分组
     # ========================================================
 
@@ -2318,23 +2323,21 @@ def main():
         )
 
     # ========================================================
-    # 按运营商分组：mobile / unicom / telecom
+    # 按运营商分组：cmcc / cu / ct
     #
-    # 直接复用 all_items（已按地区限量之后的最终节点集合），
-    # 按 isp 字段重新分组，输出独立订阅文件，和分地区文件并列。
+    # 直接从全部健康节点 good 里取，而不是从地区限量之后的
+    # all_items 里取，所以运营商文件和地区文件互不影响、
+    # 不共享额度：每个运营商各自最多 max_nodes_per_region 个。
     #
-    # 注意：这里的数量上限跟分地区文件用的是同一个
-    # max_nodes_per_region（也就是"每个分类最多 N 个"里的 N），
-    # 不是全局 all.txt 的总数上限——同一批节点，只是按
-    # 运营商这个维度重新切一份、各自最多 maxn 个。
+    # （以前从 all_items 里取，某个地区超过上限时，落在上限
+    #  之外的运营商节点会直接消失，例如 OTHER 地区里的移动节点。）
     #
-    # 节点编号复用同一个 item["_index"]，所以同一节点在
-    # all.txt / 分地区文件 / 分运营商文件里名字完全一致。
+    # 运营商文件里的节点用运营商名称单独编号：CMCC-01 / CU-01 / CT-01
     # ========================================================
 
     isp_grouped = {}
 
-    for item in all_items:
+    for item in good:
 
         isp = item.get(
             "isp",
@@ -2352,6 +2355,9 @@ def main():
                 []
             ).append(item)
 
+    isp_items_all = []
+    isp_selected_ids = set()
+
     for isp, items in sorted(
         isp_grouped.items()
     ):
@@ -2361,12 +2367,31 @@ def main():
         if not items:
             continue
 
+        isp_selected_ids.update(
+            id(item)
+            for item in items
+        )
+
+        isp_items = []
+
+        for index, item in enumerate(
+            items,
+            1
+        ):
+
+            temp_item = dict(item)
+            temp_item["_index"] = index
+            temp_item["_group"] = isp
+
+            isp_items.append(temp_item)
+
         nodes = [
             vless_node(
                 item,
-                item["_index"]
+                item["_index"],
+                group=isp
             )
-            for item in items
+            for item in isp_items
         ]
 
         isp_name = isp.lower()
@@ -2378,27 +2403,58 @@ def main():
 
         write_clash_yaml(
             OUT / f"{isp_name}.yaml",
-            items
+            isp_items
         )
+
+        isp_items_all.extend(isp_items)
 
         print(
             f"[INFO] ISP group {isp}: "
-            f"{len(items)} nodes (capped at {maxn}) -> "
+            f"{len(isp_items)} nodes (capped at {maxn}) -> "
             f"{isp_name}.txt / {isp_name}.yaml"
         )
 
     # ========================================================
     # ALL TXT + ALL YAML
     #
-    # 两者严格使用同一个 all_items。
+    # 两者使用同一份 all_final：
+    #   地区节点（去掉已经进入运营商文件的） + 运营商节点
+    # 每个 IP 只出现一次，属于运营商的只保留运营商名称那份。
+    #
+    # output.max_nodes_total（可选，默认 0 = 不限制）：
+    # 只限制 all.txt / all.yaml 的总数，不影响地区和运营商文件。
+    # 注意：这个版本没有延迟数据，超过上限时按当前顺序截取前 N 个。
     # ========================================================
+
+    all_final = [
+        item
+        for item in all_items
+        if id(item) not in isp_selected_ids
+    ] + isp_items_all
+
+    max_total = int(
+        CFG["output"].get(
+            "max_nodes_total",
+            0
+        ) or 0
+    )
+
+    if max_total > 0 and len(all_final) > max_total:
+
+        print(
+            f"[INFO] max_nodes_total={max_total}: "
+            f"trimming all {len(all_final)} -> {max_total}"
+        )
+
+        all_final = all_final[:max_total]
 
     all_nodes = [
         vless_node(
             item,
-            item["_index"]
+            item["_index"],
+            group=item.get("_group")
         )
-        for item in all_items
+        for item in all_final
     ]
 
     if not all_nodes:
@@ -2416,7 +2472,7 @@ def main():
 
     write_clash_yaml(
         OUT / "all.yaml",
-        all_items
+        all_final
     )
 
     # ========================================================
@@ -2441,7 +2497,7 @@ def main():
 
     print(
         f"[DONE] generated "
-        f"{len(all_items)} Mihomo proxies"
+        f"{len(all_final)} Mihomo proxies"
     )
 
     print(
