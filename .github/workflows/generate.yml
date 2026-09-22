@@ -5,7 +5,7 @@ on:
   schedule:
     # GitHub Actions 使用 UTC
     # 每个 UTC 小时的第 24 分钟执行一次（北京时间为每小时第 14 分钟 + 8 小时）
-    - cron: '24 * * * *'
+    - cron: '24 */1 * * *'
   push:
     # 只有默认分支的 push 才会触发生成 + 提交历史池 + 部署 Pages，
     # 避免功能分支/PR 分支意外写历史池或抢占 Pages 部署。
