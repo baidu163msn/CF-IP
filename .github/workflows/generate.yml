@@ -4,14 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # GitHub Actions 使用 UTC
-    # 每个 UTC 小时的第 24 分钟执行一次（北京时间为每小时第 14 分钟 + 8 小时）
     - cron: '24 */1 * * *'
-  push:
-    # 只有默认分支的 push 才会触发生成 + 提交历史池 + 部署 Pages，
-    # 避免功能分支/PR 分支意外写历史池或抢占 Pages 部署。
-    branches:
-      - main
-
 # ============================================================
 # GitHub Actions 权限
 #
@@ -26,9 +19,8 @@ permissions:
 # 防止多个运行同时修改历史池 / Pages
 #
 # cancel-in-progress: false ——
-# 定时任务每小时一次；如果上一次运行尚未结束，保留旧任务，避免历史池与 Pages 部署出现中间态。
-# 去取消一个可能已经提交完历史池、只差最后部署一步的旧任务，
-# 那样反而容易出现"历史池已更新，但 Pages 还是旧版本"的中间态。
+# 定时任务每小时一次；如果上一轮运行尚未结束，保留旧任务，
+# 避免历史池与 Pages 部署出现中间态。
 # ============================================================
 
 concurrency:
@@ -44,9 +36,8 @@ jobs:
 
   generate:
 
-    # push 事件已经用 branches: [main] 限制过；
-    # 这里再兜底一层，防止 workflow_dispatch 手动选中非默认分支时
-    # 也去提交历史池 / 触发部署。
+    # 仅允许默认分支执行，避免手动运行非默认分支时
+    # 提交历史池或部署 Pages。
     if: >-
       github.ref ==
       format('refs/heads/{0}', github.event.repository.default_branch)
