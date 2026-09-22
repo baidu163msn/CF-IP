@@ -490,12 +490,16 @@ def tcp_tls_test(item):
     tls_timeout = float(
         CFG["test"]["tls_timeout"]
     )
+    
+    latency_ms = 9999.0
 
     try:
+        start_time = time.monotonic()
         with socket.create_connection(
             (host, port),
             timeout=timeout,
         ) as sock:
+            latency_ms = (time.monotonic() - start_time) * 1000
 
             sock.settimeout(tls_timeout)
 
@@ -552,7 +556,7 @@ def tcp_tls_test(item):
                     not real_check
                     or transport_type not in ("ws", "grpc")
                 ):
-                    return True, tls_version
+                    return True, tls_version, latency_ms
 
                 real_timeout = float(
                     CFG["test"].get(
@@ -571,18 +575,21 @@ def tcp_tls_test(item):
                         return (
                             False,
                             f"ws-check-error: {e}",
+                            latency_ms,
                         )
 
                     if "101" in status_line:
                         return (
                             True,
                             f"{tls_version} | {status_line}",
+                            latency_ms,
                         )
 
                     return (
                         False,
                         f"ws-check-rejected: "
                         f"{status_line or '(no response)'}",
+                        latency_ms,
                     )
 
                 alpn = ssock.selected_alpn_protocol()
@@ -592,6 +599,7 @@ def tcp_tls_test(item):
                         False,
                         f"grpc-check-rejected: "
                         f"ALPN negotiated '{alpn}', expected h2",
+                        latency_ms,
                     )
 
                 try:
@@ -604,26 +612,30 @@ def tcp_tls_test(item):
                         False,
                         "grpc-check-error: "
                         "h2 library not installed",
+                        latency_ms,
                     )
                 except Exception as e:
                     return (
                         False,
                         f"grpc-check-error: {e}",
+                        latency_ms,
                     )
 
                 if status:
                     return (
                         True,
                         f"{tls_version} | grpc:{status}",
+                        latency_ms,
                     )
 
                 return (
                     False,
                     "grpc-check-rejected: (no response)",
+                    latency_ms,
                 )
 
     except Exception as e:
-        return False, str(e)
+        return False, str(e), latency_ms
 
 
 # ============================================================
@@ -643,6 +655,7 @@ def test_candidates(items):
             item["test_error"] = ""
             item["tested"] = False
             item["test_time"] = now
+            item["latency_ms"] = 9999.0
 
         print(
             "[INFO] health testing disabled; "
@@ -671,6 +684,7 @@ def test_candidates(items):
             item["test_error"] = ""
             item["tested"] = False
             item["test_time"] = now
+            item["latency_ms"] = 9999.0
             skipped += 1
         else:
             to_test.append(item)
@@ -713,12 +727,13 @@ def test_candidates(items):
             item = futures[future]
 
             try:
-                ok, detail = future.result()
+                ok, detail, latency = future.result()
             except Exception as e:
-                ok, detail = False, str(e)
+                ok, detail, latency = False, str(e), 9999.0
 
             item["tested"] = True
             item["test_time"] = now
+            item["latency_ms"] = latency
 
             if ok:
                 item["health_ok"] = True
@@ -1442,33 +1457,14 @@ def select_region_items(
     selected = {}
 
     for region, items in grouped.items():
-        # 历史节点优先，但当前源新节点也允许进入。
+        # 核心逻辑优化：新节点 > 健康度 > 延迟最低
         items = sorted(
             items,
             key=lambda x: (
-                0
-                if x.get(
-                    "source_current"
-                ) is False
-                else 1,
-                0
-                if x.get(
-                    "failures",
-                    0,
-                ) == 0
-                else 1,
-                x.get(
-                    "last_success",
-                    "",
-                ),
-                x.get(
-                    "last_seen",
-                    "",
-                ),
-                x.get(
-                    "address",
-                    "",
-                ),
+                0 if x.get("source_current") is True else 1,
+                0 if x.get("failures", 0) == 0 else 1,
+                x.get("latency_ms", 9999.0),
+                x.get("address", ""),
             ),
         )
 
@@ -1535,9 +1531,6 @@ def write_region_outputs(
 
         region_name = region.lower()
 
-        # 关键修复：
-        # 即使本轮 0 节点，也写出空 TXT/YAML。
-        # 因此 Provider 不会因为文件不存在而 404。
         write_subscription(
             OUT / f"{region_name}.txt",
             nodes,
@@ -1586,22 +1579,14 @@ def write_isp_outputs(
     for isp, items in sorted(
         grouped.items()
     ):
+        # 核心逻辑优化：新节点 > 健康度 > 延迟最低
         items = sorted(
             items,
             key=lambda x: (
-                0
-                if x.get(
-                    "source_current"
-                ) is False
-                else 1,
-                x.get(
-                    "last_success",
-                    "",
-                ),
-                x.get(
-                    "address",
-                    "",
-                ),
+                0 if x.get("source_current") is True else 1,
+                0 if x.get("failures", 0) == 0 else 1,
+                x.get("latency_ms", 9999.0),
+                x.get("address", ""),
             ),
         )[:maxn]
 
@@ -1747,14 +1732,6 @@ def main():
         candidates
     )
 
-    # --------------------------------------------------------
-    # 关键修复：
-    # 先从“本次健康候选全集”选地区输出，
-    # 再裁剪持久化历史池。
-    #
-    # 因此历史 JP 即使这次刚好不在新的历史池 60 条以内，
-    # 只要它本次健康，它仍然可以作为 JP 备用节点输出。
-    # --------------------------------------------------------
     good = [
         item
         for item in candidates
@@ -1847,10 +1824,6 @@ def main():
         all_final,
     )
 
-    # --------------------------------------------------------
-    # 更新并限制历史池。
-    # 每个地区先保留最低库存，再用剩余名额按健康度补齐。
-    # --------------------------------------------------------
     new_history, history_stats = update_history(
         candidates,
         old_history,
