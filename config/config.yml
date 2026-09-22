@@ -31,7 +31,7 @@ test:
   real_check_timeout: 5.0
 
 history:
-  max_pool_size: 60
+  max_pool_size: 200
   max_failures: 3
 
   # 地区最低备用库存。历史池满时先保这些地区，再用剩余名额补齐。
