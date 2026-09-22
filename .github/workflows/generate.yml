@@ -11,14 +11,6 @@ on:
     # 避免功能分支/PR 分支意外写历史池或抢占 Pages 部署。
     branches:
       - main
-    paths:
-      # 注意：必须带 ** 才能匹配目录下的所有文件，
-      # 光写 "config/" 这种没有通配符的写法永远不会命中任何改动。
-      - "config/**"
-      - "templates/**"
-      - "src/**"
-      - ".github/workflows/**"
-      - "requirements.txt"
 
 # ============================================================
 # GitHub Actions 权限
