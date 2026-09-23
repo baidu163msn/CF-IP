@@ -16,7 +16,6 @@ concurrency:
 
 jobs:
   generate:
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -42,9 +41,9 @@ jobs:
 
       - name: Generate subscriptions
         run: |
+          python -m py_compile src/generator.py
           python -u src/generator.py
 
-      # 三线对齐：python <<'PY' / Python 代码 / 结尾 PY 同缩进
       - name: Validate output
         env:
           PYTHONIOENCODING: utf-8
@@ -81,9 +80,15 @@ jobs:
           )
 
           try:
-              data = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
+              data = yaml.safe_load(
+                  yml.read_text(encoding="utf-8")
+              ) or {}
               proxies = data.get("proxies", [])
-              yaml_count = len(proxies) if isinstance(proxies, list) else 0
+              yaml_count = (
+                  len(proxies)
+                  if isinstance(proxies, list)
+                  else 0
+              )
           except Exception as exc:
               print(f"[ERROR] all.yaml parse failed: {exc}")
               sys.exit(1)
@@ -121,9 +126,14 @@ jobs:
           HISTORY = Path("data/ip_history.json")
           CONFIG = Path("config/config.yml")
 
-          cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8")) or {}
+          cfg = yaml.safe_load(
+              CONFIG.read_text(encoding="utf-8")
+          ) or {}
+
           history_cfg = cfg.get("history", {}) or {}
-          history_limit = int(history_cfg.get("max_pool_size", 200))
+          history_limit = int(
+              history_cfg.get("max_pool_size", 200)
+          )
 
           def count_txt(name):
               path = OUT / f"{name}.txt"
@@ -131,12 +141,15 @@ jobs:
                   return 0
               try:
                   text = base64.b64decode(
-                      path.read_text(encoding="utf-8").strip()
+                      path.read_text(
+                          encoding="utf-8"
+                      ).strip()
                   ).decode("utf-8")
               except Exception:
                   return 0
               return sum(
-                  1 for line in text.splitlines()
+                  1
+                  for line in text.splitlines()
                   if line.strip().startswith("vless://")
               )
 
@@ -146,10 +159,16 @@ jobs:
                   return 0
               try:
                   data = yaml.safe_load(
-                      path.read_text(encoding="utf-8")
+                      path.read_text(
+                          encoding="utf-8"
+                      )
                   ) or {}
                   proxies = data.get("proxies", [])
-                  return len(proxies) if isinstance(proxies, list) else 0
+                  return (
+                      len(proxies)
+                      if isinstance(proxies, list)
+                      else 0
+                  )
               except Exception:
                   return 0
 
@@ -159,6 +178,7 @@ jobs:
           ]
 
           values = {}
+
           for group in groups:
               values[f"{group.upper()}_TXT"] = count_txt(group)
               values[f"{group.upper()}_YAML"] = count_yaml(group)
@@ -169,9 +189,15 @@ jobs:
           if HISTORY.exists():
               try:
                   history = json.loads(
-                      HISTORY.read_text(encoding="utf-8")
+                      HISTORY.read_text(
+                          encoding="utf-8"
+                      )
                   )
-                  history_count = len(history) if isinstance(history, dict) else 0
+                  history_count = (
+                      len(history)
+                      if isinstance(history, dict)
+                      else 0
+                  )
               except Exception:
                   history_count = 0
           else:
@@ -180,13 +206,21 @@ jobs:
           values["HISTORY_COUNT"] = history_count
           values["HISTORY_LIMIT"] = history_limit
 
-          with open("/tmp/cf-ip-stats.env", "w", encoding="utf-8") as f:
+          with open(
+              "/tmp/cf-ip-stats.env",
+              "w",
+              encoding="utf-8",
+          ) as f:
               for key, value in values.items():
                   f.write(f"{key}={value}\n")
 
-          with open("/tmp/cf-ip-stats.json", "w", encoding="utf-8") as f:
-              json.dump(values, f, ensure_ascii=False, indent=2)
-          print(json.dumps(values, ensure_ascii=False, indent=2))
+          print(
+              json.dumps(
+                  values,
+                  ensure_ascii=False,
+                  indent=2,
+              )
+          )
           PY
 
       - name: Generate Summary
@@ -232,10 +266,6 @@ jobs:
             echo "**${TOTAL_TXT} 个 VLESS 节点**"
             echo ""
             echo "**${TOTAL_YAML} 个 Mihomo 节点**"
-            echo ""
-            echo "## 🌐 GitHub Pages"
-            echo ""
-            echo "部署完成后的真实地址见 Deploy 任务摘要。"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Update README statistics
@@ -265,7 +295,9 @@ jobs:
           readme = Path("README.md")
 
           if readme.exists():
-              text = readme.read_text(encoding="utf-8")
+              text = readme.read_text(
+                  encoding="utf-8"
+              )
           else:
               text = "# CF-IP 优化版\n"
 
@@ -288,8 +320,8 @@ jobs:
           | 地区 | VLESS TXT | Mihomo YAML |
           |:---|---:|---:|
           | 🇭🇰 香港 HK | {e("HK_TXT")} | {e("HK_YAML")} |
-          | 🇯 日本 JP | {e("JP_TXT")} | {e("JP_YAML")} |
-          | 🇸 新加坡 SG | {e("SG_TXT")} | {e("SG_YAML")} |
+          | 🇯🇵 日本 JP | {e("JP_TXT")} | {e("JP_YAML")} |
+          | 🇸🇬 新加坡 SG | {e("SG_TXT")} | {e("SG_YAML")} |
           | 🇰🇷 韩国 KR | {e("KR_TXT")} | {e("KR_YAML")} |
           | 🇹🇼 台湾 TW | {e("TW_TXT")} | {e("TW_YAML")} |
           | 🇺🇸 美国 US | {e("US_TXT")} | {e("US_YAML")} |
@@ -322,9 +354,18 @@ jobs:
               else:
                   new_text += "\n"
           else:
-              new_text = text.rstrip() + "\n\n" + block + "\n"
+              new_text = (
+                  text.rstrip()
+                  + "\n\n"
+                  + block
+                  + "\n"
+              )
 
-          readme.write_text(new_text, encoding="utf-8")
+          readme.write_text(
+              new_text,
+              encoding="utf-8"
+          )
+
           print("[OK] README statistics updated.")
           PY
 
