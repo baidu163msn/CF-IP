@@ -294,12 +294,10 @@ jobs:
             kr \
             tw \
             us \
-            de \
-            cn \
             other \
-            mobile \
-            unicom \
-            telecom
+            cmcc \
+            cu \
+            ct
           do
 
             txt="output/${group}.txt"
