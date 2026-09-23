@@ -31,6 +31,50 @@ MAX_FAILURES = int(CFG.get("history", {}).get("max_failures", 3))
 MAX_HISTORY_DEFAULT = 5000
 
 
+def _output_cfg():
+    return CFG.get("output", {}) or {}
+
+
+def _excluded_regions():
+    cfg = CFG.get("filters", {}) or {}
+    values = cfg.get("excluded_regions", []) or []
+    return {str(x).upper() for x in values if str(x).strip()}
+
+
+def _enabled_regions():
+    ocfg = _output_cfg()
+    values = ocfg.get("enabled_regions")
+    if values is None:
+        values = list((ocfg.get("regions") or {}).keys())
+    return {str(x).upper() for x in values if str(x).strip()}
+
+
+def _region_limit(region):
+    ocfg = _output_cfg()
+    default = int(ocfg.get("max_nodes_per_region", 100))
+    limits = ocfg.get("region_limits") or {}
+    try:
+        return max(0, int(limits.get(str(region).upper(), default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _enabled_isps():
+    ocfg = _output_cfg()
+    values = ocfg.get("enabled_isps")
+    if values is None:
+        values = ["CMCC", "CU", "CT"]
+    return {str(x).upper() for x in values if str(x).strip()}
+
+
+def _isp_limit():
+    return max(0, int(_output_cfg().get("max_nodes_per_isp", _output_cfg().get("max_nodes_per_region", 100))))
+
+
+def is_region_excluded(region):
+    return str(region or "OTHER").upper() in _excluded_regions()
+
+
 def utc_now() -> str:
     return (
         datetime.datetime.now(datetime.timezone.utc)
@@ -111,34 +155,27 @@ def region_from_comment(comment: str, source_name: str = "") -> str:
 
 
 def has_excluded_region(comment: str, source_name: str = "") -> bool:
-    """
-    DE/CN 硬排除：
-    只要 comment 或 source name 明确出现 DE/CN 的地区别名，
-    就不进入当前候选池，也不进入历史池。
-    """
+    """Return True when comment/source contains an alias of a configured excluded region."""
     text = f"{comment or ''} {source_name or ''}".strip()
-
-    excluded = (
-        list(DEFAULT_REGION_ALIASES["DE"])
-        + list(DEFAULT_REGION_ALIASES["CN"])
-    )
+    excluded_regions = _excluded_regions()
+    if not excluded_regions:
+        return False
 
     configured = CFG.get("region_aliases") or {}
-    for region in ("DE", "CN"):
-        excluded.extend(configured.get(region, []) or [])
+    aliases = []
+    for region in excluded_regions:
+        aliases.extend(DEFAULT_REGION_ALIASES.get(region, []))
+        aliases.extend(configured.get(region, []) or [])
 
-    for alias in sorted(set(map(str, excluded)), key=len, reverse=True):
+    for alias in sorted(set(map(str, aliases)), key=len, reverse=True):
         if not alias:
             continue
         pattern = re.compile(
-            r"(?<![A-Za-z0-9])"
-            + re.escape(alias)
-            + r"(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])" + re.escape(alias) + r"(?![A-Za-z0-9])",
             re.I,
         )
         if pattern.search(text):
             return True
-
     return False
 
 
@@ -398,7 +435,7 @@ def load_history():
 
             # 即使历史记录里 region 被旧版本错误写成 DE/CN，
             # 也不能继续保留。
-            if old_region in ("DE", "CN"):
+            if is_region_excluded(old_region):
                 excluded += 1
                 continue
 
@@ -446,8 +483,7 @@ def merge_candidates(current_items, history):
         item = dict(old)
 
         if (
-            str(item.get("region", "OTHER")).upper()
-            in ("DE", "CN")
+            is_region_excluded(item.get("region", "OTHER"))
             or has_excluded_region(
                 item.get("comment", ""),
                 item.get("source", ""),
@@ -1102,7 +1138,7 @@ def limit_history(history):
         for region, minimum in reserve_cfg.items():
             region = str(region).upper()
 
-            if region in ("DE", "CN"):
+            if is_region_excluded(region):
                 continue
 
             need = max(0, int(minimum))
@@ -1431,49 +1467,21 @@ def clean_output():
 # ============================================================
 
 def select_region_items(good):
-    maxn = int(
-        CFG["output"].get(
-            "max_nodes_per_region",
-            100,
-        )
-    )
-
-    reserve_cfg = CFG.get(
-        "history",
-        {},
-    ).get(
-        "min_nodes_per_region",
-        {},
-    )
-
+    reserve_cfg = CFG.get("history", {}).get("min_nodes_per_region", {}) or {}
     if not isinstance(reserve_cfg, dict):
         reserve_cfg = {}
 
+    enabled = _enabled_regions()
     grouped = {}
 
     for item in good:
-        region = str(
-            item.get(
-                "region",
-                "OTHER",
-            )
-        ).upper()
-
-        if region in ("DE", "CN"):
+        region = str(item.get("region", "OTHER")).upper()
+        if is_region_excluded(region) or region not in enabled:
             continue
-
-        grouped.setdefault(
-            region,
-            [],
-        ).append(item)
+        grouped.setdefault(region, []).append(item)
 
     selected = {}
-
     for region, items in grouped.items():
-        # 三维排序：
-        # 1. 当前源新鲜节点优先
-        # 2. failures == 0 的健康节点优先
-        # 3. TCP RTT 最低优先
         items = sorted(
             items,
             key=lambda x: (
@@ -1483,118 +1491,74 @@ def select_region_items(good):
                 x.get("address", ""),
             ),
         )
+        selected[region] = items[:_region_limit(region)]
 
-        selected[region] = items[:maxn]
+    for region in enabled:
+        if not is_region_excluded(region):
+            selected.setdefault(region, [])
 
+    # 保留历史备用配置中启用地区的空分类，但不让 excluded region 回流。
     for region in reserve_cfg:
         region = str(region).upper()
-        if region not in ("DE", "CN"):
+        if region in enabled and not is_region_excluded(region):
             selected.setdefault(region, [])
 
     return selected
 
 
 def write_region_outputs(grouped):
-    maxn = int(
-        CFG["output"].get(
-            "max_nodes_per_region",
-            100,
-        )
-    )
-
     all_items = []
+    enabled = _enabled_regions()
+    region_names = CFG.get("output", {}).get("regions", {}) or {}
 
-    configured_regions = list(
-        CFG["output"].get(
-            "regions",
-            {},
-        ).keys()
-    )
-
-    regions = sorted(
-        set(configured_regions)
-        | set(grouped.keys())
-    )
+    regions = sorted(enabled | set(grouped.keys()))
 
     for region in regions:
-        if str(region).upper() in ("DE", "CN"):
+        region = str(region).upper()
+        if is_region_excluded(region) or region not in enabled:
             continue
 
-        items = list(
-            grouped.get(
-                region,
-                [],
-            )
-        )[:maxn]
+        limit = _region_limit(region)
+        items = list(grouped.get(region, []))[:limit]
 
-        for index, item in enumerate(
-            items,
-            1,
-        ):
+        for index, item in enumerate(items, 1):
             item["_index"] = index
 
         all_items.extend(items)
 
-        nodes = [
-            vless_node(
-                item,
-                item["_index"],
-            )
-            for item in items
-        ]
+        nodes = [vless_node(item, item["_index"]) for item in items]
+        region_name = region.lower()
 
-        region_name = str(region).lower()
-
-        write_subscription(
-            OUT / f"{region_name}.txt",
-            nodes,
-        )
-
-        write_clash_yaml(
-            OUT / f"{region_name}.yaml",
-            items,
-        )
+        write_subscription(OUT / f"{region_name}.txt", nodes)
+        write_clash_yaml(OUT / f"{region_name}.yaml", items)
 
         print(
-            f"[INFO] Region {region}: "
-            f"{len(items)} nodes -> "
-            f"{region_name}.txt / "
-            f"{region_name}.yaml"
+            f"[INFO] Region {region}: {len(items)} nodes -> "
+            f"{region_name}.txt / {region_name}.yaml"
         )
 
     return all_items
 
 
-def write_isp_outputs(good, maxn):
+def write_isp_outputs(good, maxn=None):
     grouped = {}
+    enabled_regions = _enabled_regions()
+    enabled_isps = _enabled_isps()
+    isp_limit = _isp_limit()
 
     for item in good:
-        if str(
-            item.get("region", "OTHER")
-        ).upper() in ("DE", "CN"):
+        region = str(item.get("region", "OTHER")).upper()
+        if is_region_excluded(region) or region not in enabled_regions:
             continue
 
-        isp = item.get(
-            "isp",
-            "OTHER",
-        )
-
-        if isp in (
-            "CMCC",
-            "CU",
-            "CT",
-        ):
-            grouped.setdefault(
-                isp,
-                [],
-            ).append(item)
+        isp = str(item.get("isp", "OTHER")).upper()
+        if isp in enabled_isps:
+            grouped.setdefault(isp, []).append(item)
 
     selected_all = []
     selected_ids = set()
 
-    for isp, items in sorted(
-        grouped.items()
-    ):
+    for isp, items in sorted(grouped.items()):
         items = sorted(
             items,
             key=lambda x: (
@@ -1603,46 +1567,26 @@ def write_isp_outputs(good, maxn):
                 x.get("latency_ms", 9999.0),
                 x.get("address", ""),
             ),
-        )[:maxn]
+        )[:isp_limit]
 
         temp_items = []
-
-        for index, item in enumerate(
-            items,
-            1,
-        ):
+        for index, item in enumerate(items, 1):
             temp = dict(item)
             temp["_index"] = index
             temp["_group"] = isp
-
             temp_items.append(temp)
             selected_ids.add(id(item))
 
         write_subscription(
             OUT / f"{isp.lower()}.txt",
-            [
-                vless_node(
-                    item,
-                    item["_index"],
-                    group=isp,
-                )
-                for item in temp_items
-            ],
+            [vless_node(item, item["_index"], group=isp) for item in temp_items],
         )
-
-        write_clash_yaml(
-            OUT / f"{isp.lower()}.yaml",
-            temp_items,
-        )
-
+        write_clash_yaml(OUT / f"{isp.lower()}.yaml", temp_items)
         selected_all.extend(temp_items)
 
         print(
-            f"[INFO] ISP group {isp}: "
-            f"{len(temp_items)} nodes "
-            f"(capped at {maxn}) -> "
-            f"{isp.lower()}.txt / "
-            f"{isp.lower()}.yaml"
+            f"[INFO] ISP group {isp}: {len(temp_items)} nodes "
+            f"(capped at {isp_limit}) -> {isp.lower()}.txt / {isp.lower()}.yaml"
         )
 
     return selected_all, selected_ids
@@ -1656,7 +1600,7 @@ def main():
     print("=" * 60)
     print("CF-IP VLESS Generator")
     print("Regional Alias + 200-IP History Pool + Health Check")
-    print("DE/CN hard exclusion + ISP output + README statistics")
+    print("Configurable region/ISP filters + history pool + health check")
     print("=" * 60)
 
     clean_output()
@@ -1734,9 +1678,8 @@ def main():
         item
         for item in candidates
         if item.get("health_ok", False)
-        and str(
-            item.get("region", "OTHER")
-        ).upper() not in ("DE", "CN")
+        and not is_region_excluded(item.get("region", "OTHER"))
+        and str(item.get("region", "OTHER")).upper() in _enabled_regions()
     ]
 
     if not good:
@@ -1750,17 +1693,7 @@ def main():
     grouped = select_region_items(good)
     all_items = write_region_outputs(grouped)
 
-    maxn = int(
-        CFG["output"].get(
-            "max_nodes_per_region",
-            100,
-        )
-    )
-
-    isp_items, isp_selected_ids = write_isp_outputs(
-        good,
-        maxn,
-    )
+    isp_items, isp_selected_ids = write_isp_outputs(good)
 
     all_final = [
         item
