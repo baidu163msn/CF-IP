@@ -533,8 +533,7 @@ jobs:
       # 不写入动态生成时间，因此：
       # 如果节点数量没有变化，README 不产生 commit。
       # ======================================================
-
-      - name: Update README statistics
+- name: Update README statistics
         shell: bash
         run: |
 
