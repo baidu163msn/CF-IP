@@ -2,8 +2,6 @@
 
 一个基于 Cloudflare IP 源、历史节点池和 TLS/WS 健康检查的 VLESS/Mihomo 节点生成项目。
 
-## 📊 当前节点统计
-
 <!-- CF-IP-STATS:START -->
 
 ## 📊 当前节点统计
