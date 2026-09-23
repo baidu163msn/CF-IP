@@ -1,5 +1,5 @@
 # cf-vless-generator
-# 地区别名 + 历史节点池 + DE/CN 排除优化版
+# 地区别名 + 200 个历史节点池 + DE/CN 排除优化版
 
 sources:
   - name: vvHan-V6
@@ -33,8 +33,6 @@ test:
 history:
   max_pool_size: 200
   max_failures: 3
-
-  # 历史池满时优先保证这些地区各有最低备用库存。
   min_nodes_per_region:
     HK: 2
     JP: 2
@@ -46,13 +44,8 @@ history:
 output:
   keep_failed: false
   include_domain_source: true
-
-  # 每个地区/运营商订阅最多输出多少节点。
   max_nodes_per_region: 10
-
-  # 0 = 不限制 all.txt / all.yaml 总节点数。
   max_nodes_total: 0
-
   naming: "{REGION}-{INDEX:02d}"
 
   regions:
@@ -69,16 +62,12 @@ output:
     CU: "中国联通"
     CT: "中国电信"
 
-# 明确的数据中心/地区代码映射。
-# DE/CN 虽保留在 generator.py 的硬排除逻辑中，
-# 但不放入输出地区列表，因此不会占用节点名额。
 region_aliases:
   HK:
     - HK
     - HKG
     - Hong Kong
     - 香港
-
   JP:
     - JP
     - JPN
@@ -89,14 +78,12 @@ region_aliases:
     - OSA
     - Japan
     - 日本
-
   SG:
     - SG
     - SGP
     - SIN
     - Singapore
     - 新加坡
-
   KR:
     - KR
     - KOR
@@ -105,14 +92,12 @@ region_aliases:
     - GMP
     - Korea
     - 韩国
-
   TW:
     - TW
     - TWN
     - TPE
     - Taiwan
     - 台湾
-
   US:
     - US
     - USA
@@ -132,3 +117,18 @@ region_aliases:
     - PDX
     - United States
     - 美国
+  DE:
+    - DE
+    - DEU
+    - FRA
+    - BER
+    - MUC
+    - DUS
+    - HAM
+    - Germany
+    - 德国
+  CN:
+    - CN
+    - CHN
+    - China
+    - 中国
