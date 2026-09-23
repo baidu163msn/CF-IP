@@ -1,46 +1,22 @@
 name: Generate VLESS subscriptions
+
 on:
   workflow_dispatch:
   schedule:
     # GitHub Actions 使用 UTC
-    - cron: '24 */1 * * *'
-# ============================================================
-# GitHub Actions 权限
-#
-# 顶层只给最小权限，真正需要的 contents:write（生成任务提交历史池）
-# 和 pages:write / id-token:write（部署任务）分别下放到对应 job。
-# ============================================================
+    # 每小时第 24 分钟尝试执行一次
+    - cron: '24 * * * *'
 
 permissions:
   contents: read
 
-# ============================================================
-# 防止多个运行同时修改历史池 / Pages
-#
-# cancel-in-progress: false ——
-# 定时任务每小时一次；如果上一轮运行尚未结束，保留旧任务，
-# 避免历史池与 Pages 部署出现中间态。
-# ============================================================
-
 concurrency:
-  group: pages
+  group: cf-ip-pages
   cancel-in-progress: false
 
-
 jobs:
-
-  # ==========================================================
-  # Generate
-  # ==========================================================
-
   generate:
-
-    # 仅允许默认分支执行，避免手动运行非默认分支时
-    # 提交历史池或部署 Pages。
-    if: >-
-      github.ref ==
-      format('refs/heads/{0}', github.event.repository.default_branch)
-
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -48,18 +24,8 @@ jobs:
       contents: write
 
     steps:
-
-      # ------------------------------------------------------
-      # Checkout
-      # ------------------------------------------------------
-
       - name: Checkout
         uses: actions/checkout@v4
-
-
-      # ------------------------------------------------------
-      # Python
-      # ------------------------------------------------------
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -68,613 +34,362 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-
-      # ------------------------------------------------------
-      # 安装依赖
-      # ------------------------------------------------------
-
       - name: Install dependencies
         run: |
           python -m pip install \
             --disable-pip-version-check \
             -r requirements.txt
 
-
-      # ======================================================
-      # 生成 TXT + YAML + 历史 IP
-      # ======================================================
-
       - name: Generate subscriptions
         run: |
           python -u src/generator.py
 
-
-      # ======================================================
-      # 验证输出
-      #
-      # 如果没有 all.txt / all.yaml
-      # 或者最终节点数为 0
-      # 直接让 Workflow 失败。
-      # ======================================================
-
+      # 使用 Python 验证输出，不再使用 awk。
       - name: Validate output
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python <<'PY'
+          import base64
+          from pathlib import Path
+          import sys
+          import yaml
+
+          txt = Path("output/all.txt")
+          yml = Path("output/all.yaml")
+
+          if not txt.is_file():
+              print("[ERROR] output/all.txt not found.")
+              sys.exit(1)
+
+          if not yml.is_file():
+              print("[ERROR] output/all.yaml not found.")
+              sys.exit(1)
+
+          try:
+              decoded = base64.b64decode(
+                  txt.read_text(encoding="utf-8").strip(),
+                  validate=True,
+              ).decode("utf-8")
+          except Exception as exc:
+              print(f"[ERROR] all.txt is not valid Base64: {exc}")
+              sys.exit(1)
+
+          txt_count = sum(
+              1 for line in decoded.splitlines()
+              if line.strip().startswith("vless://")
+          )
+
+          try:
+              data = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
+              proxies = data.get("proxies", [])
+              yaml_count = len(proxies) if isinstance(proxies, list) else 0
+          except Exception as exc:
+              print(f"[ERROR] all.yaml parse failed: {exc}")
+              sys.exit(1)
+
+          print(f"[CHECK] TXT nodes : {txt_count}")
+          print(f"[CHECK] YAML nodes: {yaml_count}")
+
+          if txt_count <= 0:
+              print("[ERROR] all.txt contains zero VLESS nodes.")
+              sys.exit(1)
+
+          if yaml_count <= 0:
+              print("[ERROR] all.yaml contains zero Mihomo nodes.")
+              sys.exit(1)
+
+          if txt_count != yaml_count:
+              print("[ERROR] TXT/YAML node count mismatch.")
+              sys.exit(1)
+
+          print("[OK] output validation passed.")
+          PY
+
+      - name: Calculate statistics
         shell: bash
         run: |
-
           set -euo pipefail
 
-          if [ ! -f "output/all.txt" ]; then
-            echo "[ERROR] output/all.txt not found."
-            exit 1
-          fi
+          python <<'PY'
+          import base64
+          import json
+          from pathlib import Path
+          import yaml
 
-          if [ ! -f "output/all.yaml" ]; then
-            echo "[ERROR] output/all.yaml not found."
-            exit 1
-          fi
+          OUT = Path("output")
+          HISTORY = Path("data/ip_history.json")
+          CONFIG = Path("config/config.yml")
 
-          TXT_COUNT=$(
-            base64 -d output/all.txt 2>/dev/null \
-              | awk '
-                  /^vless:\/\// {
-                    n++
-                  }
-                  END {
-                    print n+0
-                  }
-                '
-          )
+          cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8")) or {}
+          history_cfg = cfg.get("history", {}) or {}
+          history_limit = int(history_cfg.get("max_pool_size", 200))
 
-          YAML_COUNT=$(
-            awk '
-              /^[[:space:]]*-[[:space:]]name:/ {
-                n++
-              }
-              END {
-                print n+0
-              }
-            ' output/all.yaml
-          )
-
-          echo "[CHECK] TXT nodes : $TXT_COUNT"
-          echo "[CHECK] YAML nodes: $YAML_COUNT"
-
-          if [ "$TXT_COUNT" -le 0 ]; then
-            echo "[ERROR] all.txt contains zero VLESS nodes."
-            exit 1
-          fi
-
-          if [ "$YAML_COUNT" -le 0 ]; then
-            echo "[ERROR] all.yaml contains zero Mihomo nodes."
-            exit 1
-          fi
-
-          if [ "$TXT_COUNT" -ne "$YAML_COUNT" ]; then
-            echo "[ERROR] TXT/YAML node count mismatch."
-            exit 1
-          fi
-
-          echo "[OK] output validation passed."
-
-
-      # ======================================================
-      # OUTPUT
-      # ======================================================
-
-      - name: OUTPUT
-        shell: bash
-        run: |
-
-          set -euo pipefail
-
-          echo ""
-          echo "========================================"
-          echo "          CF-IP OUTPUT"
-          echo "========================================"
-          echo ""
-
-          echo "生成时间：$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo ""
-
-          # --------------------------------------------------
-          # 历史池统计 + 历史池上限
-          #
-          # 上限从 config/config.yml 的 history.max_pool_size
-          # 读取，不再硬编码，避免和实际配置不一致。
-          # --------------------------------------------------
-
-          if [ -f "data/ip_history.json" ]; then
-            HISTORY_COUNT=$(python -c 'import json; print(len(json.load(open("data/ip_history.json"))))' 2>/dev/null || echo "0")
-          else
-            HISTORY_COUNT=0
-          fi
-
-          HISTORY_LIMIT=$(
-            python -c "import yaml; cfg = yaml.safe_load(open('config/config.yml', encoding='utf-8')); print(cfg.get('history', {}).get('max_pool_size', 5000))" \
-              2>/dev/null || echo "5000"
-          )
-
-          echo "历史 IP 池：$HISTORY_COUNT"
-          echo "淘汰规则：连续 3 次健康检查失败"
-          echo "历史池上限：$HISTORY_LIMIT"
-          echo ""
-
-
-          # --------------------------------------------------
-          # Base64 TXT 节点统计
-          # --------------------------------------------------
-
-          count_txt_nodes() {
-
-            local file="$1"
-
-            if [ -f "$file" ]; then
-
-              base64 -d "$file" 2>/dev/null \
-                | awk '
-                    /^vless:\/\// {
-                      n++
-                    }
-                    END {
-                      print n+0
-                    }
-                  '
-
-            else
-
-              echo "0"
-
-            fi
-          }
-
-
-          # --------------------------------------------------
-          # YAML 节点统计
-          # --------------------------------------------------
-
-          count_yaml_nodes() {
-
-            local file="$1"
-
-            if [ -f "$file" ]; then
-
-              awk '
-                /^[[:space:]]*-[[:space:]]name:/ {
-                  n++
-                }
-                END {
-                  print n+0
-                }
-              ' "$file"
-
-            else
-
-              echo "0"
-
-            fi
-          }
-
-
-          # --------------------------------------------------
-          # ALL
-          # --------------------------------------------------
-
-          TOTAL_TXT=$(
-            count_txt_nodes \
-              "output/all.txt"
-          )
-
-          TOTAL_YAML=$(
-            count_yaml_nodes \
-              "output/all.yaml"
-          )
-
-
-          echo "最终 VLESS 节点：$TOTAL_TXT"
-          echo "最终 Mihomo 节点：$TOTAL_YAML"
-          echo ""
-
-          echo "----------------------------------------"
-          printf "%-18s %8s %8s\n" \
-            "文件" \
-            "TXT" \
-            "YAML"
-
-          echo "----------------------------------------"
-
-
-          # --------------------------------------------------
-          # 地区 / 运营商统计
-          # --------------------------------------------------
-
-          for group in \
-            hk \
-            jp \
-            sg \
-            kr \
-            tw \
-            us \
-            other \
-            cmcc \
-            cu \
-            ct
-          do
-
-            txt="output/${group}.txt"
-            yaml="output/${group}.yaml"
-
-            if [ -f "$txt" ] || [ -f "$yaml" ]; then
-
-              txt_count=$(
-                count_txt_nodes "$txt"
+          def count_txt(name):
+              path = OUT / f"{name}.txt"
+              if not path.exists():
+                  return 0
+              try:
+                  text = base64.b64decode(
+                      path.read_text(encoding="utf-8").strip()
+                  ).decode("utf-8")
+              except Exception:
+                  return 0
+              return sum(
+                  1 for line in text.splitlines()
+                  if line.strip().startswith("vless://")
               )
 
-              yaml_count=$(
-                count_yaml_nodes "$yaml"
-              )
+          def count_yaml(name):
+              path = OUT / f"{name}.yaml"
+              if not path.exists():
+                  return 0
+              try:
+                  data = yaml.safe_load(
+                      path.read_text(encoding="utf-8")
+                  ) or {}
+                  proxies = data.get("proxies", [])
+                  return len(proxies) if isinstance(proxies, list) else 0
+              except Exception:
+                  return 0
 
-              printf "%-18s %8s %8s\n" \
-                "${group}.txt" \
-                "$txt_count" \
-                "$yaml_count"
+          groups = [
+              "hk", "jp", "sg", "kr", "tw", "us", "other",
+              "cmcc", "cu", "ct",
+          ]
 
-            fi
+          values = {}
+          for group in groups:
+              values[f"{group.upper()}_TXT"] = count_txt(group)
+              values[f"{group.upper()}_YAML"] = count_yaml(group)
 
-          done
+          values["TOTAL_TXT"] = count_txt("all")
+          values["TOTAL_YAML"] = count_yaml("all")
 
+          if HISTORY.exists():
+              try:
+                  history = json.loads(
+                      HISTORY.read_text(encoding="utf-8")
+                  )
+                  history_count = len(history) if isinstance(history, dict) else 0
+              except Exception:
+                  history_count = 0
+          else:
+              history_count = 0
 
-          echo "----------------------------------------"
+          values["HISTORY_COUNT"] = history_count
+          values["HISTORY_LIMIT"] = history_limit
 
-          printf "%-18s %8s %8s\n" \
-            "ALL" \
-            "$TOTAL_TXT" \
-            "$TOTAL_YAML"
+          with open("/tmp/cf-ip-stats.env", "w", encoding="utf-8") as f:
+              for key, value in values.items():
+                  f.write(f"{key}={value}\n")
 
-          echo "----------------------------------------"
-          echo ""
-
-          # 部署阶段才知道真实的 page_url，这里只能先给出
-          # "大概率是这个地址"的默认 Project Pages 域名。
-          # 真正准确的链接以 Deploy 任务最后打印的为准。
-          PROBABLE_BASE="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
-
-          echo "Pages（部署完成后可用）："
-          echo "${PROBABLE_BASE}/"
-          echo ""
-          echo "VLESS TXT:"
-          echo "${PROBABLE_BASE}/all.txt"
-          echo ""
-          echo "Mihomo YAML:"
-          echo "${PROBABLE_BASE}/all.yaml"
-          echo ""
-
-          echo "========================================"
-
-
-      # ======================================================
-      # GitHub Actions Summary
-      # ======================================================
+          with open("/tmp/cf-ip-stats.json", "w", encoding="utf-8") as f:
+              json.dump(values, f, ensure_ascii=False, indent=2)
+          print(json.dumps(values, ensure_ascii=False, indent=2))
+          PY
 
       - name: Generate Summary
         shell: bash
         run: |
-
           set -euo pipefail
-
-          count_txt_nodes() {
-
-            local file="$1"
-
-            if [ -f "$file" ]; then
-
-              base64 -d "$file" 2>/dev/null \
-                | awk '
-                    /^vless:\/\// {
-                      n++
-                    }
-                    END {
-                      print n+0
-                    }
-                  '
-
-            else
-
-              echo "0"
-
-            fi
-          }
-
-
-          count_yaml_nodes() {
-
-            local file="$1"
-
-            if [ -f "$file" ]; then
-
-              awk '
-                /^[[:space:]]*-[[:space:]]name:/ {
-                  n++
-                }
-                END {
-                  print n+0
-                }
-              ' "$file"
-
-            else
-
-              echo "0"
-
-            fi
-          }
-
-
-          TOTAL_TXT=$(
-            count_txt_nodes \
-              "output/all.txt"
-          )
-
-          TOTAL_YAML=$(
-            count_yaml_nodes \
-              "output/all.yaml"
-          )
-
-
-          if [ -f "data/ip_history.json" ]; then
-
-            HISTORY_COUNT=$(python -c 'import json; print(len(json.load(open("data/ip_history.json"))))' 2>/dev/null || echo "0")
-
-          else
-
-            HISTORY_COUNT=0
-
-          fi
-
-          HISTORY_LIMIT=$(
-            python -c "import yaml; cfg = yaml.safe_load(open('config/config.yml', encoding='utf-8')); print(cfg.get('history', {}).get('max_pool_size', 5000))" \
-              2>/dev/null || echo "5000"
-          )
-
+          source /tmp/cf-ip-stats.env
 
           {
             echo "# 🚀 CF-IP 生成结果"
             echo ""
-
-            echo "**生成时间：**"
+            echo "## 📊 地区节点统计"
             echo ""
-            echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo ""
-
-            echo "## 📊 节点统计"
-            echo ""
-
-            echo "| 分类 | VLESS TXT | Mihomo YAML |"
+            echo "| 地区 | VLESS TXT | Mihomo YAML |"
             echo "|:---|---:|---:|"
-
-
-            for group in \
-              hk \
-              jp \
-              sg \
-              kr \
-              tw \
-              us \
-              de \
-              cn \
-              other \
-              mobile \
-              unicom \
-              telecom
-            do
-
-              txt="output/${group}.txt"
-              yaml="output/${group}.yaml"
-
-              if [ -f "$txt" ] || [ -f "$yaml" ]; then
-
-                txt_count=$(
-                  count_txt_nodes "$txt"
-                )
-
-                yaml_count=$(
-                  count_yaml_nodes "$yaml"
-                )
-
-                echo "| ${group} | ${txt_count} | ${yaml_count} |"
-
-              fi
-
-            done
-
-
+            echo "| 🇭🇰 香港 HK | ${HK_TXT} | ${HK_YAML} |"
+            echo "| 🇯🇵 日本 JP | ${JP_TXT} | ${JP_YAML} |"
+            echo "| 🇸🇬 新加坡 SG | ${SG_TXT} | ${SG_YAML} |"
+            echo "| 🇰🇷 韩国 KR | ${KR_TXT} | ${KR_YAML} |"
+            echo "| 🇹🇼 台湾 TW | ${TW_TXT} | ${TW_YAML} |"
+            echo "| 🇺🇸 美国 US | ${US_TXT} | ${US_YAML} |"
+            echo "| 🌐 其他 OTHER | ${OTHER_TXT} | ${OTHER_YAML} |"
             echo ""
-
+            echo "## 📡 运营商节点统计"
+            echo ""
+            echo "| 运营商 | VLESS TXT | Mihomo YAML |"
+            echo "|:---|---:|---:|"
+            echo "| 📱 中国移动 CMCC | ${CMCC_TXT} | ${CMCC_YAML} |"
+            echo "| 🔗 中国联通 CU | ${CU_TXT} | ${CU_YAML} |"
+            echo "| ☎️ 中国电信 CT | ${CT_TXT} | ${CT_YAML} |"
+            echo ""
             echo "## 🗃️ 历史 IP 池"
             echo ""
-
-            echo "**${HISTORY_COUNT} 个 IP**"
+            echo "**${HISTORY_COUNT} / ${HISTORY_LIMIT} 个 IP**"
             echo ""
-
             echo "- 当前源 IP 与历史 IP 一起健康检查"
             echo "- 源站消失但仍健康的 IP 继续保留"
             echo "- 连续 3 次健康检查失败后淘汰"
-            echo "- 历史池上限：${HISTORY_LIMIT}"
-
+            echo "- DE / CN 节点不进入历史池"
             echo ""
-
             echo "## 📦 总计"
             echo ""
-
             echo "**${TOTAL_TXT} 个 VLESS 节点**"
             echo ""
-
             echo "**${TOTAL_YAML} 个 Mihomo 节点**"
             echo ""
-
             echo "## 🌐 GitHub Pages"
             echo ""
-            echo "部署完成后的真实地址见本次运行的 Deploy 任务摘要。"
-
+            echo "部署完成后的真实地址见 Deploy 任务摘要。"
           } >> "$GITHUB_STEP_SUMMARY"
 
-
-      # ======================================================
-      # 提交历史 IP 池
-      #
-      # 关键修复：
-      # 先 git add，再使用 git diff --cached。
-      #
-      # 这样第一次创建 data/ip_history.json
-      # 也可以正常提交。
-      #
-      # data/** 不在 push.paths 中，
-      # 所以历史 commit 不会再次触发本 Workflow。
-      # ======================================================
-
-      - name: Save IP history
+      - name: Update README statistics
         shell: bash
         run: |
-
           set -euo pipefail
+          source /tmp/cf-ip-stats.env
 
-          git config user.name \
-            "github-actions[bot]"
+          export \
+            HK_TXT HK_YAML \
+            JP_TXT JP_YAML \
+            SG_TXT SG_YAML \
+            KR_TXT KR_YAML \
+            TW_TXT TW_YAML \
+            US_TXT US_YAML \
+            OTHER_TXT OTHER_YAML \
+            CMCC_TXT CMCC_YAML \
+            CU_TXT CU_YAML \
+            CT_TXT CT_YAML \
+            TOTAL_TXT TOTAL_YAML \
+            HISTORY_COUNT HISTORY_LIMIT
 
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          python <<'PY'
+          import os
+          from pathlib import Path
 
+          readme = Path("README.md")
 
-          if [ ! -f "data/ip_history.json" ]; then
+          if readme.exists():
+              text = readme.read_text(encoding="utf-8")
+          else:
+              text = "# CF-IP 优化版\n"
 
-            echo "[INFO] data/ip_history.json was not generated."
-            exit 0
+          start = "<!-- CF-IP-STATS:START -->"
+          end = "<!-- CF-IP-STATS:END -->"
 
-          fi
+          def e(name):
+              return os.environ.get(name, "0")
 
-
-          git add data/ip_history.json
-
-
-          if git diff --cached --quiet; then
-
-            echo "[INFO] IP history unchanged."
-
-          else
-
-            echo "[INFO] Updating IP history..."
-
-            git commit \
-              -m "chore: update IP history"
-
-            git push
-
-          fi
-
-
-      # ======================================================
-      # 上传 GitHub Pages artifact
-      # ======================================================
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: output
-
-
-  # ==========================================================
-  # Deploy
-  # ==========================================================
-
-  deploy:
-
-    needs: generate
-
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    permissions:
-      pages: write
-      id-token: write
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-
-    steps:
-
-      # ------------------------------------------------------
-      # Deploy
-      # ------------------------------------------------------
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-
-
-      # ======================================================
-      # Deployment OUTPUT
-      #
-      # 用 deploy-pages 实际返回的 page_url，
-      # 不再硬编码仓库/域名，以后改名不用来回改。
-      # ======================================================
-
-      - name: Deployment OUTPUT
-        shell: bash
-        env:
-          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
-        run: |
-
-          set -euo pipefail
-
-          BASE_URL="${PAGE_URL%/}"
-
-          echo ""
-          echo "========================================"
-          echo "       CF-IP DEPLOYMENT"
-          echo "========================================"
-          echo ""
-
-          echo "状态：✅ GitHub Pages 部署成功"
-          echo ""
-
-          echo "Pages："
-          echo "${BASE_URL}/"
-          echo ""
-
-          echo "VLESS TXT："
-          echo "${BASE_URL}/all.txt"
-          echo ""
-
-          echo "Mihomo YAML："
-          echo "${BASE_URL}/all.yaml"
-          echo ""
-
-          echo "========================================"
-
-
-          {
-            echo ""
-            echo "# ✅ CF-IP 部署成功"
-            echo ""
-
-            echo "GitHub Pages 已成功部署。"
-            echo ""
-
-            echo "🌐 **Pages：**"
-            echo ""
-
-            echo "[打开 Pages](${BASE_URL}/)"
-            echo ""
-
-            echo "📄 **VLESS：**"
-            echo ""
-
-            echo "[all.txt](${BASE_URL}/all.txt)"
-            echo ""
-
-            echo "📄 **Mihomo：**"
-            echo ""
-
-            echo "[all.yaml](${BASE_URL}/all.yaml)"
-
-          } >> "$GITHUB_STEP_SUMMARY"
+          block = f"""
+          {start}
+          
+          ## 📊 当前节点统计
+          
+          > 本区域由 GitHub Actions 自动更新。  
+          > 仅当统计数据发生变化时，README 的统计内容才会变化。
+          
+          ### 🌍 地区节点
+          
+          | 地区 | VLESS TXT | Mihomo YAML |
+          |:---|---:|---:|
+          | 🇭🇰 香港 HK | {e("HK_TXT")} | {e("HK_YAML")} |
+          | 🇯🇵 日本 JP | {e("JP_TXT")} | {e("JP_YAML")} |
+          | 🇸🇬 新加坡 SG | {e("SG_TXT")} | {e("SG_YAML")} |
+          | 🇰🇷 韩国 KR | {e("KR_TXT")} | {e("KR_YAML")} |
+          | 🇹🇼 台湾 TW | {e("TW_TXT")} | {e("TW_YAML")} |
+          | 🇺🇸 美国 US | {e("US_TXT")} | {e("US_YAML")} |
+          | 🌐 其他 OTHER | {e("OTHER_TXT")} | {e("OTHER_YAML")} |
+          
+          ### 📡 运营商节点
+          
+          | 运营商 | VLESS TXT | Mihomo YAML |
+          |:---|---:|---:|
+          | 📱 中国移动 CMCC | {e("CMCC_TXT")} | {e("CMCC_YAML")} |
+          | 🔗 中国联通 CU | {e("CU_TXT")} | {e("CU_YAML")} |
+          | ☎️ 中国电信 CT | {e("CT_TXT")} | {e("CT_YAML")} |
+          
+          ### 📦 总计
+          
+          - **VLESS：{e("TOTAL_TXT")} 个节点**
+          - **Mihomo：{e("TOTAL_YAML")} 个节点**
+          - **历史 IP 池：{e("HISTORY_COUNT")} / {e("HISTORY_LIMIT")}**
+          - **DE / CN：排除，不占用节点池名额**
+          
+          {end}
+          """.strip()
+          
+                    if start in text and end in text:
+                        before = text.split(start, 1)[0].rstrip()
+                        after = text.split(end, 1)[1].lstrip()
+                        new_text = before + "\n\n" + block
+                        if after:
+                            new_text += "\n\n" + after
+                        else:
+                            new_text += "\n"
+                    else:
+                        new_text = text.rstrip() + "\n\n" + block + "\n"
+          
+                    readme.write_text(new_text, encoding="utf-8")
+                    print("[OK] README statistics updated.")
+                    PY
+          
+                - name: Save IP history and README
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+          
+                    git config user.name "github-actions[bot]"
+                    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+                    git add data/ip_history.json README.md
+          
+                    if git diff --cached --quiet; then
+                      echo "[INFO] IP history and README unchanged."
+                    else
+                      git commit -m "chore: update IP history and statistics"
+                      git push
+                    fi
+          
+                - name: Upload Pages artifact
+                  uses: actions/upload-pages-artifact@v3
+                  with:
+                    path: output
+          
+            deploy:
+              needs: generate
+              runs-on: ubuntu-latest
+              timeout-minutes: 10
+          
+              permissions:
+                pages: write
+                id-token: write
+          
+              environment:
+                name: github-pages
+                url: ${{ steps.deployment.outputs.page_url }}
+          
+              steps:
+                - name: Deploy to GitHub Pages
+                  id: deployment
+                  uses: actions/deploy-pages@v4
+          
+                - name: Deployment summary
+                  shell: bash
+                  env:
+                    PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+                  run: |
+                    set -euo pipefail
+                    BASE_URL="${PAGE_URL%/}"
+          
+                    {
+                      echo ""
+                      echo "# ✅ CF-IP 部署成功"
+                      echo ""
+                      echo "🌐 Pages："
+                      echo "${BASE_URL}/"
+                      echo ""
+                      echo "📄 VLESS："
+                      echo "${BASE_URL}/all.txt"
+                      echo ""
+                      echo "📄 Mihomo："
+                      echo "${BASE_URL}/all.yaml"
+                    } >> "$GITHUB_STEP_SUMMARY"
+          
+                    echo "Pages: ${BASE_URL}/"
+                    echo "VLESS: ${BASE_URL}/all.txt"
+                    echo "Mihomo: ${BASE_URL}/all.yaml"
