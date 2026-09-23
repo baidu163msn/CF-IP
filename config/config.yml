@@ -42,7 +42,6 @@ history:
     KR: 2
     TW: 2
     US: 2
-    DE: 2
 
 output:
   keep_failed: false
@@ -58,8 +57,6 @@ output:
     KR: "韩国"
     TW: "台湾"
     US: "美国"
-    DE: "德国"
-    CN: "中国"
     OTHER: "其他"
 
   isp_names:
@@ -129,20 +126,3 @@ region_aliases:
     - PDX
     - United States
     - 美国
-
-  DE:
-    - DE
-    - DEU
-    - FRA
-    - BER
-    - MUC
-    - DUS
-    - HAM
-    - Germany
-    - 德国
-
-  CN:
-    - CN
-    - CHN
-    - China
-    - 中国
