@@ -324,7 +324,11 @@ jobs:
 
           set -euo pipefail
 
+          set -a
+          set -a
           source /tmp/cf-ip-stats.env
+          set +a
+          set +a
 
 
           echo ""
@@ -533,13 +537,15 @@ jobs:
       # 不写入动态生成时间，因此：
       # 如果节点数量没有变化，README 不产生 commit。
       # ======================================================
-- name: Update README statistics
+      - name: Update README statistics
         shell: bash
         run: |
 
           set -euo pipefail
 
+          set -a
           source /tmp/cf-ip-stats.env
+          set +a
 
           export \
             REGION_HK_TXT \
@@ -670,32 +676,6 @@ jobs:
 
           PY
 
-
-        env:
-          REGION_HK_TXT: ${{ env.REGION_HK_TXT }}
-          REGION_HK_YAML: ${{ env.REGION_HK_YAML }}
-          REGION_JP_TXT: ${{ env.REGION_JP_TXT }}
-          REGION_JP_YAML: ${{ env.REGION_JP_YAML }}
-          REGION_SG_TXT: ${{ env.REGION_SG_TXT }}
-          REGION_SG_YAML: ${{ env.REGION_SG_YAML }}
-          REGION_KR_TXT: ${{ env.REGION_KR_TXT }}
-          REGION_KR_YAML: ${{ env.REGION_KR_YAML }}
-          REGION_TW_TXT: ${{ env.REGION_TW_TXT }}
-          REGION_TW_YAML: ${{ env.REGION_TW_YAML }}
-          REGION_US_TXT: ${{ env.REGION_US_TXT }}
-          REGION_US_YAML: ${{ env.REGION_US_YAML }}
-          REGION_OTHER_TXT: ${{ env.REGION_OTHER_TXT }}
-          REGION_OTHER_YAML: ${{ env.REGION_OTHER_YAML }}
-          ISP_CMCC_TXT: ${{ env.ISP_CMCC_TXT }}
-          ISP_CMCC_YAML: ${{ env.ISP_CMCC_YAML }}
-          ISP_CU_TXT: ${{ env.ISP_CU_TXT }}
-          ISP_CU_YAML: ${{ env.ISP_CU_YAML }}
-          ISP_CT_TXT: ${{ env.ISP_CT_TXT }}
-          ISP_CT_YAML: ${{ env.ISP_CT_YAML }}
-          TOTAL_TXT: ${{ env.TOTAL_TXT }}
-          TOTAL_YAML: ${{ env.TOTAL_YAML }}
-          HISTORY_COUNT: ${{ env.HISTORY_COUNT }}
-          HISTORY_LIMIT: ${{ env.HISTORY_LIMIT }}
 
 
       # ======================================================
