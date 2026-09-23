@@ -52,7 +52,8 @@ DEFAULT_REGION_ALIASES = {
     "TW": ["TW", "TWN", "TPE", "Taiwan", "台湾"],
     "US": [
         "US", "USA", "LAX", "SFO", "SEA", "ORD", "DFW", "ATL", "IAD",
-        "EWR", "JFK", "MIA", "DEN", "PHX", "LAS", "PDX", "United States", "美国",
+        "EWR", "JFK", "MIA", "DEN", "PHX", "LAS", "PDX",
+        "United States", "美国",
     ],
     "DE": ["DE", "DEU", "FRA", "BER", "MUC", "DUS", "HAM", "Germany", "德国"],
     "CN": ["CN", "CHN", "China", "中国"],
@@ -62,23 +63,31 @@ DEFAULT_REGION_ALIASES = {
 def _build_region_patterns():
     configured = CFG.get("region_aliases") or {}
     merged = {k: list(v) for k, v in DEFAULT_REGION_ALIASES.items()}
+
     for region, aliases in configured.items():
-        merged[region.upper()] = list(dict.fromkeys(
-            merged.get(region.upper(), []) + [str(x) for x in (aliases or [])]
-        ))
+        region = str(region).upper()
+        merged[region] = list(
+            dict.fromkeys(
+                merged.get(region, [])
+                + [str(x) for x in (aliases or [])]
+            )
+        )
 
     patterns = []
     for region, aliases in merged.items():
         for alias in sorted(set(aliases), key=len, reverse=True):
             if alias:
-                patterns.append((
-                    region,
-                    re.compile(
-                        r"(?<![A-Za-z0-9])" + re.escape(alias) +
-                        r"(?![A-Za-z0-9])",
-                        re.I,
-                    ),
-                ))
+                patterns.append(
+                    (
+                        region,
+                        re.compile(
+                            r"(?<![A-Za-z0-9])"
+                            + re.escape(alias)
+                            + r"(?![A-Za-z0-9])",
+                            re.I,
+                        ),
+                    )
+                )
     return patterns
 
 
@@ -87,10 +96,50 @@ REGION_PATTERNS = _build_region_patterns()
 
 def region_from_comment(comment: str, source_name: str = "") -> str:
     text = str(comment or "").strip()
+
     for region, pattern in REGION_PATTERNS:
         if pattern.search(text):
             return region
+
+    # 某些源可能把地区写在 source name 中。
+    source_text = str(source_name or "").strip()
+    for region, pattern in REGION_PATTERNS:
+        if pattern.search(source_text):
+            return region
+
     return "OTHER"
+
+
+def has_excluded_region(comment: str, source_name: str = "") -> bool:
+    """
+    DE/CN 硬排除：
+    只要 comment 或 source name 明确出现 DE/CN 的地区别名，
+    就不进入当前候选池，也不进入历史池。
+    """
+    text = f"{comment or ''} {source_name or ''}".strip()
+
+    excluded = (
+        list(DEFAULT_REGION_ALIASES["DE"])
+        + list(DEFAULT_REGION_ALIASES["CN"])
+    )
+
+    configured = CFG.get("region_aliases") or {}
+    for region in ("DE", "CN"):
+        excluded.extend(configured.get(region, []) or [])
+
+    for alias in sorted(set(map(str, excluded)), key=len, reverse=True):
+        if not alias:
+            continue
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9])"
+            + re.escape(alias)
+            + r"(?![A-Za-z0-9])",
+            re.I,
+        )
+        if pattern.search(text):
+            return True
+
+    return False
 
 
 # ============================================================
@@ -98,22 +147,42 @@ def region_from_comment(comment: str, source_name: str = "") -> str:
 # ============================================================
 
 ISP_ALIASES = {
-    "中国移动": "CMCC", "移动": "CMCC", "mobile": "CMCC", "cmcc": "CMCC",
-    "中国联通": "CU", "联通": "CU", "unicom": "CU", "cucc": "CU",
-    "中国电信": "CT", "电信": "CT", "telecom": "CT", "ctcc": "CT",
+    "中国移动": "CMCC",
+    "移动": "CMCC",
+    "mobile": "CMCC",
+    "cmcc": "CMCC",
+    "中国联通": "CU",
+    "联通": "CU",
+    "unicom": "CU",
+    "cucc": "CU",
+    "中国电信": "CT",
+    "电信": "CT",
+    "telecom": "CT",
+    "ctcc": "CT",
 }
+
 ISP_CODE_RE = re.compile(r"\b(CMCC|CUCC|CU|CTCC|CT)\b", re.I)
-ISP_CODE_MAP = {"CMCC": "CMCC", "CUCC": "CU", "CU": "CU", "CTCC": "CT", "CT": "CT"}
+ISP_CODE_MAP = {
+    "CMCC": "CMCC",
+    "CUCC": "CU",
+    "CU": "CU",
+    "CTCC": "CT",
+    "CT": "CT",
+}
 
 
 def isp_from_comment(comment: str) -> str:
-    m = ISP_CODE_RE.search(comment or "")
+    text = str(comment or "")
+
+    m = ISP_CODE_RE.search(text)
     if m:
         return ISP_CODE_MAP[m.group(1).upper()]
-    text = (comment or "").lower()
+
+    lower = text.lower()
     for key, value in ISP_ALIASES.items():
-        if key in text:
+        if key.lower() in lower:
             return value
+
     return "OTHER"
 
 
@@ -128,14 +197,17 @@ IP_PORT_RE = re.compile(
 
 def normalize_address(raw: str):
     raw = raw.strip()
+
     if raw.startswith("[") and raw.endswith("]"):
         raw = raw[1:-1]
+
     try:
         ip = ipaddress.ip_address(raw)
         return str(ip), "ipv6" if ip.version == 6 else "ipv4"
     except ValueError:
         if re.fullmatch(r"[A-Za-z0-9.-]+", raw) and "." in raw:
             return raw.lower(), "domain"
+
     return None, None
 
 
@@ -145,6 +217,7 @@ def item_key(item) -> str:
 
 def parse_line(line: str, source_name: str, kind: str):
     line = line.strip()
+
     if not line or line.startswith(("#", ";", "//")):
         return None
 
@@ -153,12 +226,13 @@ def parse_line(line: str, source_name: str, kind: str):
         return None
 
     address, port_s, comment = m.groups()
+
     try:
         port = int(port_s)
     except ValueError:
         return None
 
-    if not (1 <= port <= 65535):
+    if not 1 <= port <= 65535:
         return None
 
     address, addr_type = normalize_address(address)
@@ -167,10 +241,14 @@ def parse_line(line: str, source_name: str, kind: str):
 
     if kind == "ip" and addr_type not in ("ipv4", "ipv6"):
         return None
+
     if kind == "domain" and addr_type != "domain":
         return None
 
     comment = comment or ""
+
+    if has_excluded_region(comment, source_name):
+        return None
 
     return {
         "address": address,
@@ -190,7 +268,7 @@ def parse_line(line: str, source_name: str, kind: str):
 def fetch_source(source):
     req = Request(
         source["url"],
-        headers={"User-Agent": "CF-IP-VLESS-Generator/3.0"},
+        headers={"User-Agent": "CF-IP-VLESS-Generator/4.0"},
     )
     with urlopen(req, timeout=20) as response:
         return response.read().decode("utf-8", "replace")
@@ -199,28 +277,55 @@ def fetch_source(source):
 def parse_sources():
     all_items = []
     source_status = {}
+    excluded_count = 0
 
     for source in CFG.get("sources", []):
         name = source["name"]
-        source_status[name] = {"ok": False, "parsed": 0, "error": ""}
+        source_status[name] = {
+            "ok": False,
+            "parsed": 0,
+            "excluded": 0,
+            "error": "",
+        }
 
         try:
             text = fetch_source(source)
             count = 0
+            excluded = 0
 
             for line in text.splitlines():
+                before = len(all_items)
                 item = parse_line(line, name, source["kind"])
+
                 if item:
                     all_items.append(item)
                     count += 1
+                elif line.strip():
+                    # 仅用于统计 DE/CN 过滤，不把普通非法行误算进去。
+                    raw_comment = ""
+                    m = IP_PORT_RE.match(line.strip())
+                    if m:
+                        raw_comment = m.group(3) or ""
+                    if has_excluded_region(raw_comment, name):
+                        excluded += 1
+                        excluded_count += 1
 
             source_status[name]["ok"] = True
             source_status[name]["parsed"] = count
+            source_status[name]["excluded"] = excluded
 
             if count:
                 print(f"[OK] {name}: {count} parsed")
             else:
-                print(f"[WARN] {name}: download succeeded but parsed 0 candidates")
+                print(
+                    f"[WARN] {name}: download succeeded "
+                    f"but parsed 0 candidates"
+                )
+
+            if excluded:
+                print(
+                    f"[FILTER] {name}: excluded {excluded} DE/CN candidates"
+                )
 
         except Exception as e:
             source_status[name]["error"] = str(e)
@@ -235,7 +340,9 @@ def parse_sources():
             seen.add(key)
             result.append(item)
 
+    print(f"[FILTER] total DE/CN excluded from current source: {excluded_count}")
     print(f"[INFO] current-source unique candidates: {len(result)}")
+
     return result, source_status
 
 
@@ -255,6 +362,7 @@ def load_history():
             return {}
 
         clean = {}
+        excluded = 0
 
         for key, item in data.items():
             if not isinstance(item, dict):
@@ -272,15 +380,27 @@ def load_history():
                 continue
 
             comment = str(item.get("comment", ""))
-            old_region = str(item.get("region", "OTHER")).upper()
+            source = str(item.get("source", "HISTORY"))
 
-            detected = region_from_comment(
-                comment,
-                item.get("source", "HISTORY"),
-            )
+            # 历史池再次硬过滤 DE/CN，确保旧版本留下的节点也不会继续占名额。
+            if has_excluded_region(comment, source):
+                excluded += 1
+                continue
+
+            old_region = str(
+                item.get("region", "OTHER")
+            ).upper()
+
+            detected = region_from_comment(comment, source)
 
             if detected != "OTHER":
                 old_region = detected
+
+            # 即使历史记录里 region 被旧版本错误写成 DE/CN，
+            # 也不能继续保留。
+            if old_region in ("DE", "CN"):
+                excluded += 1
+                continue
 
             clean[str(key)] = {
                 "address": str(address),
@@ -292,7 +412,7 @@ def load_history():
                     or isp_from_comment(comment)
                 ),
                 "comment": comment,
-                "source": item.get("source", "HISTORY"),
+                "source": source,
                 "type": item.get("type", "ipv4"),
                 "failures": max(
                     0,
@@ -306,6 +426,11 @@ def load_history():
             }
 
         print(f"[HISTORY] loaded: {len(clean)}")
+        if excluded:
+            print(
+                f"[HISTORY] excluded {excluded} old DE/CN entries"
+            )
+
         return clean
 
     except Exception as e:
@@ -316,13 +441,32 @@ def load_history():
 def merge_candidates(current_items, history):
     merged = {}
 
+    # 历史先进入候选池。
     for key, old in history.items():
         item = dict(old)
+
+        if (
+            str(item.get("region", "OTHER")).upper()
+            in ("DE", "CN")
+            or has_excluded_region(
+                item.get("comment", ""),
+                item.get("source", ""),
+            )
+        ):
+            continue
+
         item["source_current"] = False
         item["history_key"] = key
         merged[key] = item
 
+    # 当前源覆盖历史。
     for item in current_items:
+        if has_excluded_region(
+            item.get("comment", ""),
+            item.get("source", ""),
+        ):
+            continue
+
         key = item_key(item)
         old = merged.get(key)
 
@@ -360,11 +504,12 @@ def merge_candidates(current_items, history):
 
     result = list(merged.values())
     print(f"[HISTORY] merged candidates: {len(result)}")
+
     return result
 
 
 # ============================================================
-# TLS / WS / gRPC 健康检查（含 TCP 延迟测量）
+# TLS / WS / gRPC 健康检查
 # ============================================================
 
 def grpc_upgrade_check(ssock, timeout: float) -> str:
@@ -394,7 +539,6 @@ def grpc_upgrade_check(ssock, timeout: float) -> str:
         headers,
         end_stream=True,
     )
-
     ssock.sendall(conn.data_to_send())
     ssock.settimeout(timeout)
 
@@ -483,7 +627,6 @@ def tcp_tls_test(item):
     timeout = float(
         CFG["test"]["connect_timeout"]
     )
-
     tls_timeout = float(
         CFG["test"]["tls_timeout"]
     )
@@ -492,14 +635,16 @@ def tcp_tls_test(item):
 
     try:
         start_time = time.monotonic()
+
         with socket.create_connection(
             (host, port),
             timeout=timeout,
         ) as sock:
-            latency_ms = (time.monotonic() - start_time) * 1000
+            latency_ms = (
+                time.monotonic() - start_time
+            ) * 1000
 
             sock.settimeout(tls_timeout)
-
             ctx = ssl.create_default_context()
 
             verify = bool(
@@ -513,12 +658,15 @@ def tcp_tls_test(item):
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
 
-            if str(
-                CFG["template"].get(
-                    "type",
-                    "",
-                )
-            ).lower() == "grpc":
+            if (
+                str(
+                    CFG["template"].get(
+                        "type",
+                        "",
+                    )
+                ).lower()
+                == "grpc"
+            ):
                 alpn_offer = ["h2"]
             else:
                 alpn_offer = ["http/1.1"]
@@ -532,7 +680,6 @@ def tcp_tls_test(item):
                 sock,
                 server_hostname=CFG["template"]["sni"],
             ) as ssock:
-
                 tls_version = ssock.version() or ""
 
                 real_check = bool(
@@ -553,7 +700,11 @@ def tcp_tls_test(item):
                     not real_check
                     or transport_type not in ("ws", "grpc")
                 ):
-                    return True, tls_version, latency_ms
+                    return (
+                        True,
+                        tls_version,
+                        latency_ms,
+                    )
 
                 real_timeout = float(
                     CFG["test"].get(
@@ -584,7 +735,7 @@ def tcp_tls_test(item):
 
                     return (
                         False,
-                        f"ws-check-rejected: "
+                        "ws-check-rejected: "
                         f"{status_line or '(no response)'}",
                         latency_ms,
                     )
@@ -594,7 +745,7 @@ def tcp_tls_test(item):
                 if alpn != "h2":
                     return (
                         False,
-                        f"grpc-check-rejected: "
+                        "grpc-check-rejected: "
                         f"ALPN negotiated '{alpn}', expected h2",
                         latency_ms,
                     )
@@ -642,10 +793,7 @@ def tcp_tls_test(item):
 def test_candidates(items):
     now = utc_now()
 
-    if not CFG["test"].get(
-        "enabled",
-        True,
-    ):
+    if not CFG["test"].get("enabled", True):
         for item in items:
             item["health_ok"] = True
             item["tls"] = ""
@@ -658,7 +806,6 @@ def test_candidates(items):
             "[INFO] health testing disabled; "
             "all candidates treated as healthy"
         )
-
         return items
 
     skip_ipv6 = bool(
@@ -688,9 +835,8 @@ def test_candidates(items):
 
     if skipped:
         print(
-            f"[INFO] skip_ipv6_test=true: "
-            f"{skipped} IPv6 candidates "
-            f"trusted without testing"
+            "[INFO] skip_ipv6_test=true: "
+            f"{skipped} IPv6 candidates trusted without testing"
         )
 
     workers = max(
@@ -709,7 +855,6 @@ def test_candidates(items):
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=workers,
     ) as executor:
-
         futures = {
             executor.submit(
                 tcp_tls_test,
@@ -726,7 +871,11 @@ def test_candidates(items):
             try:
                 ok, detail, latency = future.result()
             except Exception as e:
-                ok, detail, latency = False, str(e), 9999.0
+                ok, detail, latency = (
+                    False,
+                    str(e),
+                    9999.0,
+                )
 
             item["tested"] = True
             item["test_time"] = now
@@ -758,10 +907,7 @@ def test_candidates(items):
             if item.get("health_ok"):
                 continue
 
-            err = item.get(
-                "test_error",
-                "",
-            )
+            err = item.get("test_error", "")
 
             if (
                 "ws-check-rejected" in err
@@ -779,15 +925,13 @@ def test_candidates(items):
                 samples.append(err)
 
         print(
-            f"[HEALTH] failure breakdown: "
+            "[HEALTH] failure breakdown: "
             f"real-check-rejected={reject_count}, "
             f"other-errors={other_count}"
         )
 
         for err in samples:
-            print(
-                f"[HEALTH]   sample error: {err}"
-            )
+            print(f"[HEALTH]   sample error: {err}")
 
     return items
 
@@ -796,12 +940,8 @@ def test_candidates(items):
 # 历史更新
 # ============================================================
 
-def update_history(
-    candidates,
-    old_history,
-):
+def update_history(candidates, old_history):
     now = utc_now()
-
     new_history = {}
 
     stats = {
@@ -811,36 +951,30 @@ def update_history(
         "failed": 0,
         "retained_failed": 0,
         "removed": 0,
+        "excluded": 0,
     }
 
     for item in candidates:
         key = item_key(item)
+
+        if has_excluded_region(
+            item.get("comment", ""),
+            item.get("source", ""),
+        ):
+            stats["excluded"] += 1
+            continue
+
         old = old_history.get(key)
 
         if old is None:
             record = {
                 "address": item["address"],
                 "port": item["port"],
-                "region": item.get(
-                    "region",
-                    "OTHER",
-                ),
-                "isp": item.get(
-                    "isp",
-                    "OTHER",
-                ),
-                "comment": item.get(
-                    "comment",
-                    "",
-                ),
-                "source": item.get(
-                    "source",
-                    "HISTORY",
-                ),
-                "type": item.get(
-                    "type",
-                    "ipv4",
-                ),
+                "region": item.get("region", "OTHER"),
+                "isp": item.get("isp", "OTHER"),
+                "comment": item.get("comment", ""),
+                "source": item.get("source", "HISTORY"),
+                "type": item.get("type", "ipv4"),
                 "failures": 0,
                 "first_seen": now,
                 "last_seen": "",
@@ -848,16 +982,12 @@ def update_history(
                 "last_failure": "",
                 "last_error": "",
             }
-
             stats["new"] += 1
 
         else:
             record = dict(old)
 
-            if item.get(
-                "source_current",
-                False,
-            ):
+            if item.get("source_current", False):
                 if (
                     item.get("region") != "OTHER"
                     or record.get("region")
@@ -865,10 +995,7 @@ def update_history(
                 ):
                     record["region"] = item.get(
                         "region",
-                        record.get(
-                            "region",
-                            "OTHER",
-                        ),
+                        record.get("region", "OTHER"),
                     )
 
                 if (
@@ -878,34 +1005,20 @@ def update_history(
                 ):
                     record["isp"] = item.get(
                         "isp",
-                        record.get(
-                            "isp",
-                            "OTHER",
-                        ),
+                        record.get("isp", "OTHER"),
                     )
 
                 record["comment"] = item.get(
                     "comment",
-                    record.get(
-                        "comment",
-                        "",
-                    ),
+                    record.get("comment", ""),
                 )
-
                 record["source"] = item.get(
                     "source",
-                    record.get(
-                        "source",
-                        "HISTORY",
-                    ),
+                    record.get("source", "HISTORY"),
                 )
-
                 record["type"] = item.get(
                     "type",
-                    record.get(
-                        "type",
-                        "ipv4",
-                    ),
+                    record.get("type", "ipv4"),
                 )
 
         record["address"] = item["address"]
@@ -920,18 +1033,13 @@ def update_history(
             stats["success"] += 1
             new_history[key] = record
 
-        elif not item.get(
-            "tested",
-            False,
-        ):
+        elif not item.get("tested", False):
+            # IPv6 skip-test 等未测试节点不增加失败次数。
             new_history[key] = record
 
         else:
             failures = int(
-                record.get(
-                    "failures",
-                    0,
-                )
+                record.get("failures", 0)
             ) + 1
 
             record["failures"] = failures
@@ -955,38 +1063,16 @@ def update_history(
 
 def history_sort_key(item):
     return (
-        1
-        if item.get(
-            "failures",
-            0,
-        ) == 0
-        else 0,
-        1
-        if item.get(
-            "last_success",
-            "",
-        )
-        else 0,
-        item.get(
-            "last_success",
-            "",
-        ),
-        item.get(
-            "last_seen",
-            "",
-        ),
-        item.get(
-            "first_seen",
-            "",
-        ),
+        1 if item.get("failures", 0) == 0 else 0,
+        1 if item.get("last_success", "") else 0,
+        item.get("last_success", ""),
+        item.get("last_seen", ""),
+        item.get("first_seen", ""),
     )
 
 
 def limit_history(history):
-    hcfg = CFG.get(
-        "history",
-        {},
-    )
+    hcfg = CFG.get("history", {})
 
     max_history = int(
         hcfg.get(
@@ -998,14 +1084,9 @@ def limit_history(history):
     if len(history) <= max_history:
         return history, 0
 
-    records = list(
-        history.items()
-    )
-
+    records = list(history.items())
     records.sort(
-        key=lambda x: history_sort_key(
-            x[1]
-        ),
+        key=lambda x: history_sort_key(x[1]),
         reverse=True,
     )
 
@@ -1017,17 +1098,14 @@ def limit_history(history):
     selected = []
     selected_keys = set()
 
-    if isinstance(
-        reserve_cfg,
-        dict,
-    ):
+    if isinstance(reserve_cfg, dict):
         for region, minimum in reserve_cfg.items():
             region = str(region).upper()
 
-            need = max(
-                0,
-                int(minimum),
-            )
+            if region in ("DE", "CN"):
+                continue
+
+            need = max(0, int(minimum))
 
             pool = [
                 (key, value)
@@ -1035,26 +1113,19 @@ def limit_history(history):
                 if (
                     key not in selected_keys
                     and str(
-                        value.get(
-                            "region",
-                            "OTHER",
-                        )
+                        value.get("region", "OTHER")
                     ).upper()
                     == region
                 )
             ]
 
             pool.sort(
-                key=lambda x: history_sort_key(
-                    x[1]
-                ),
+                key=lambda x: history_sort_key(x[1]),
                 reverse=True,
             )
 
             for key, value in pool[:need]:
-                selected.append(
-                    (key, value)
-                )
+                selected.append((key, value))
                 selected_keys.add(key)
 
     for key, value in records:
@@ -1064,15 +1135,10 @@ def limit_history(history):
         if key in selected_keys:
             continue
 
-        selected.append(
-            (key, value)
-        )
+        selected.append((key, value))
         selected_keys.add(key)
 
-    kept = dict(
-        selected[:max_history]
-    )
-
+    kept = dict(selected[:max_history])
     removed = len(history) - len(kept)
 
     print(
@@ -1087,11 +1153,7 @@ def limit_history(history):
 # VLESS / Mihomo 输出
 # ============================================================
 
-def vless_node(
-    item,
-    index,
-    group=None,
-):
+def vless_node(item, index, group=None):
     t = CFG["template"]
 
     name = CFG["output"]["naming"].format(
@@ -1105,10 +1167,7 @@ def vless_node(
         address = f"[{address}]"
 
     transport_type = str(
-        t.get(
-            "type",
-            "",
-        )
+        t.get("type", "")
     ).lower()
 
     query = {
@@ -1147,10 +1206,7 @@ def vless_node(
     )
 
 
-def write_subscription(
-    path: Path,
-    nodes,
-):
+def write_subscription(path: Path, nodes):
     payload = "\n".join(nodes)
 
     if nodes:
@@ -1166,11 +1222,7 @@ def write_subscription(
     )
 
 
-def clash_proxy(
-    item,
-    index,
-    group=None,
-):
+def clash_proxy(item, index, group=None):
     t = CFG["template"]
 
     name = CFG["output"]["naming"].format(
@@ -1198,26 +1250,17 @@ def clash_proxy(
     alpn = t.get("alpn")
 
     if alpn:
-        if isinstance(
-            alpn,
-            str,
-        ):
+        if isinstance(alpn, str):
             proxy["alpn"] = [
                 x.strip()
                 for x in alpn.split(",")
                 if x.strip()
             ]
-        elif isinstance(
-            alpn,
-            list,
-        ):
+        elif isinstance(alpn, list):
             proxy["alpn"] = alpn
 
     transport_type = str(
-        t.get(
-            "type",
-            "",
-        )
+        t.get("type", "")
     ).lower()
 
     if transport_type == "ws":
@@ -1244,10 +1287,7 @@ def clash_proxy(
     return proxy
 
 
-def write_clash_yaml(
-    path: Path,
-    items,
-):
+def write_clash_yaml(path: Path, items):
     proxies = [
         clash_proxy(
             item,
@@ -1257,9 +1297,7 @@ def write_clash_yaml(
         for item in items
     ]
 
-    data = {
-        "proxies": proxies
-    }
+    data = {"proxies": proxies}
 
     path.write_text(
         yaml.safe_dump(
@@ -1276,9 +1314,7 @@ def write_clash_yaml(
 # 首页
 # ============================================================
 
-def write_index(
-    history_stats=None,
-):
+def write_index(history_stats=None):
     region_names = CFG.get(
         "output",
         {},
@@ -1297,9 +1333,7 @@ def write_index(
 
     links = []
 
-    for p in sorted(
-        OUT.glob("*")
-    ):
+    for p in sorted(OUT.glob("*")):
         if p.suffix.lower() not in (
             ".txt",
             ".yaml",
@@ -1310,39 +1344,28 @@ def write_index(
         label = p.name
 
         if code in region_names:
-            label += (
-                f"（{region_names[code]}）"
-            )
-
+            label += f"（{region_names[code]}）"
         elif code in isp_names:
-            label += (
-                f"（{isp_names[code]}）"
-            )
+            label += f"（{isp_names[code]}）"
 
         links.append(
-            f"<li>"
-            f"<a href='{p.name}'>"
-            f"{label}"
-            f"</a>"
-            f"</li>"
+            f"<li><a href='{p.name}'>{label}</a></li>"
         )
 
     extra_html = ""
 
     if (
-        CFG.get(
-            "output",
-            {},
-        ).get(
+        CFG.get("output", {}).get(
             "keep_failed",
             False,
         )
         and history_stats
     ):
         extra_html = (
-            "<p>观察中（未连续失败 3 次）的历史 IP："
-            f"{history_stats.get('retained_failed', 0)}"
-            " 个，未包含在订阅内。</p>"
+            "<p>观察中（未连续失败 "
+            f"{MAX_FAILURES} 次）的历史 IP："
+            f"{history_stats.get('retained_failed', 0)} "
+            "个，未包含在订阅内。</p>"
         )
 
     html = (
@@ -1356,6 +1379,7 @@ def write_index(
         "</head>"
         "<body>"
         "<h1>CF VLESS subscriptions</h1>"
+        "<p>DE / CN 节点已排除，不进入历史池和订阅。</p>"
         "<ul>"
         + "".join(links)
         + "</ul>"
@@ -1364,17 +1388,13 @@ def write_index(
         "</html>"
     )
 
-    (
-        OUT / "index.html"
-    ).write_text(
+    (OUT / "index.html").write_text(
         html,
         encoding="utf-8",
     )
 
 
-def save_history(
-    history,
-):
+def save_history(history):
     temp_file = HISTORY_FILE.with_suffix(
         ".json.tmp"
     )
@@ -1407,12 +1427,10 @@ def clean_output():
 
 
 # ============================================================
-# 地区选择（新节点 > 健康度 > 低延迟）
+# 地区选择
 # ============================================================
 
-def select_region_items(
-    good,
-):
+def select_region_items(good):
     maxn = int(
         CFG["output"].get(
             "max_nodes_per_region",
@@ -1428,28 +1446,34 @@ def select_region_items(
         {},
     )
 
-    if not isinstance(
-        reserve_cfg,
-        dict,
-    ):
+    if not isinstance(reserve_cfg, dict):
         reserve_cfg = {}
 
     grouped = {}
 
     for item in good:
+        region = str(
+            item.get(
+                "region",
+                "OTHER",
+            )
+        ).upper()
+
+        if region in ("DE", "CN"):
+            continue
+
         grouped.setdefault(
-            str(
-                item.get(
-                    "region",
-                    "OTHER",
-                )
-            ).upper(),
+            region,
             [],
         ).append(item)
 
     selected = {}
 
     for region, items in grouped.items():
+        # 三维排序：
+        # 1. 当前源新鲜节点优先
+        # 2. failures == 0 的健康节点优先
+        # 3. TCP RTT 最低优先
         items = sorted(
             items,
             key=lambda x: (
@@ -1463,17 +1487,14 @@ def select_region_items(
         selected[region] = items[:maxn]
 
     for region in reserve_cfg:
-        selected.setdefault(
-            str(region).upper(),
-            [],
-        )
+        region = str(region).upper()
+        if region not in ("DE", "CN"):
+            selected.setdefault(region, [])
 
     return selected
 
 
-def write_region_outputs(
-    grouped,
-):
+def write_region_outputs(grouped):
     maxn = int(
         CFG["output"].get(
             "max_nodes_per_region",
@@ -1484,11 +1505,9 @@ def write_region_outputs(
     all_items = []
 
     configured_regions = list(
-        (
-            CFG["output"].get(
-                "regions",
-                {},
-            )
+        CFG["output"].get(
+            "regions",
+            {},
         ).keys()
     )
 
@@ -1498,6 +1517,9 @@ def write_region_outputs(
     )
 
     for region in regions:
+        if str(region).upper() in ("DE", "CN"):
+            continue
+
         items = list(
             grouped.get(
                 region,
@@ -1521,7 +1543,7 @@ def write_region_outputs(
             for item in items
         ]
 
-        region_name = region.lower()
+        region_name = str(region).lower()
 
         write_subscription(
             OUT / f"{region_name}.txt",
@@ -1543,13 +1565,15 @@ def write_region_outputs(
     return all_items
 
 
-def write_isp_outputs(
-    good,
-    maxn,
-):
+def write_isp_outputs(good, maxn):
     grouped = {}
 
     for item in good:
+        if str(
+            item.get("region", "OTHER")
+        ).upper() in ("DE", "CN"):
+            continue
+
         isp = item.get(
             "isp",
             "OTHER",
@@ -1592,10 +1616,7 @@ def write_isp_outputs(
             temp["_group"] = isp
 
             temp_items.append(temp)
-
-            selected_ids.add(
-                id(item)
-            )
+            selected_ids.add(id(item))
 
         write_subscription(
             OUT / f"{isp.lower()}.txt",
@@ -1614,9 +1635,7 @@ def write_isp_outputs(
             temp_items,
         )
 
-        selected_all.extend(
-            temp_items
-        )
+        selected_all.extend(temp_items)
 
         print(
             f"[INFO] ISP group {isp}: "
@@ -1634,19 +1653,11 @@ def write_isp_outputs(
 # ============================================================
 
 def main():
-    print(
-        "============================================================"
-    )
-    print(
-        "CF-IP VLESS Generator"
-    )
-    print(
-        "Regional Alias Mapping + "
-        "Regional History Reserve + Health Check"
-    )
-    print(
-        "============================================================"
-    )
+    print("=" * 60)
+    print("CF-IP VLESS Generator")
+    print("Regional Alias + 200-IP History Pool + Health Check")
+    print("DE/CN hard exclusion + ISP output + README statistics")
+    print("=" * 60)
 
     clean_output()
 
@@ -1670,9 +1681,9 @@ def main():
         ]
 
         print(
-            f"[INFO] include_domain_source=false: "
+            "[INFO] include_domain_source=false: "
             f"dropped {before - len(current_items)} "
-            f"domain candidates"
+            "domain candidates"
         )
 
     source_total = len(source_status)
@@ -1714,42 +1725,30 @@ def main():
     )
 
     if not candidates:
-        print(
-            "[ERROR] no candidates available"
-        )
+        print("[ERROR] no candidates available")
         sys.exit(1)
 
-    candidates = test_candidates(
-        candidates
-    )
+    candidates = test_candidates(candidates)
 
     good = [
         item
         for item in candidates
-        if item.get(
-            "health_ok",
-            False,
-        )
+        if item.get("health_ok", False)
+        and str(
+            item.get("region", "OTHER")
+        ).upper() not in ("DE", "CN")
     ]
 
     if not good:
-        print(
-            "[ERROR] zero healthy nodes remain."
-        )
+        print("[ERROR] zero healthy nodes remain.")
         sys.exit(1)
 
     print(
-        f"[INFO] final healthy candidates: "
-        f"{len(good)}"
+        f"[INFO] final healthy candidates: {len(good)}"
     )
 
-    grouped = select_region_items(
-        good
-    )
-
-    all_items = write_region_outputs(
-        grouped
-    )
+    grouped = select_region_items(good)
+    all_items = write_region_outputs(grouped)
 
     maxn = int(
         CFG["output"].get(
@@ -1758,11 +1757,9 @@ def main():
         )
     )
 
-    isp_items, isp_selected_ids = (
-        write_isp_outputs(
-            good,
-            maxn,
-        )
+    isp_items, isp_selected_ids = write_isp_outputs(
+        good,
+        maxn,
     )
 
     all_final = [
@@ -1784,18 +1781,13 @@ def main():
         and len(all_final) > max_total
     ):
         print(
-            f"[INFO] max_nodes_total="
-            f"{max_total}: trimming all "
-            f"{len(all_final)} -> "
-            f"{max_total}"
+            f"[INFO] max_nodes_total={max_total}: "
+            f"trimming all {len(all_final)} -> {max_total}"
         )
-
         all_final = all_final[:max_total]
 
     if not all_final:
-        print(
-            "[ERROR] final node selection is empty"
-        )
+        print("[ERROR] final node selection is empty")
         sys.exit(1)
 
     write_subscription(
@@ -1826,70 +1818,35 @@ def main():
 
     history_stats["removed"] += limit_removed
 
-    save_history(
-        new_history
-    )
+    save_history(new_history)
 
     print("")
+    print("================ HISTORY =================")
+    print(f"[HISTORY] loaded: {history_stats['loaded']}")
+    print(f"[HISTORY] new: {history_stats['new']}")
+    print(f"[HISTORY] health success: {history_stats['success']}")
+    print(f"[HISTORY] health failed: {history_stats['failed']}")
     print(
-        "================ HISTORY ================="
-    )
-    print(
-        f"[HISTORY] loaded: "
-        f"{history_stats['loaded']}"
-    )
-    print(
-        f"[HISTORY] new: "
-        f"{history_stats['new']}"
-    )
-    print(
-        f"[HISTORY] health success: "
-        f"{history_stats['success']}"
-    )
-    print(
-        f"[HISTORY] health failed: "
-        f"{history_stats['failed']}"
-    )
-    print(
-        f"[HISTORY] retained failed: "
+        "[HISTORY] retained failed: "
         f"{history_stats['retained_failed']}"
     )
-    print(
-        f"[HISTORY] removed: "
-        f"{history_stats['removed']}"
-    )
-    print(
-        f"[HISTORY] final pool: "
-        f"{len(new_history)}"
-    )
-    print(
-        "==========================================="
-    )
+    print(f"[HISTORY] removed: {history_stats['removed']}")
+    print(f"[HISTORY] excluded DE/CN: {history_stats['excluded']}")
+    print(f"[HISTORY] final pool: {len(new_history)}")
+    print("===========================================")
 
-    write_index(
-        history_stats
-    )
+    write_index(history_stats)
 
     print("")
+    print("=" * 60)
+    print(f"[DONE] generated {len(all_final)} VLESS nodes")
+    print(f"[DONE] generated {len(all_final)} Mihomo proxies")
     print(
-        "============================================================"
-    )
-    print(
-        f"[DONE] generated "
-        f"{len(all_final)} VLESS nodes"
-    )
-    print(
-        f"[DONE] generated "
-        f"{len(all_final)} Mihomo proxies"
-    )
-    print(
-        f"[DONE] history pool "
+        "[DONE] history pool "
         f"{len(new_history)}/"
         f"{CFG.get('history', {}).get('max_pool_size', MAX_HISTORY_DEFAULT)}"
     )
-    print(
-        "============================================================"
-    )
+    print("=" * 60)
 
 
 if __name__ == "__main__":
