@@ -5,6 +5,9 @@ sources:
   - name: vvHan-V6
     url: https://bestcf.pages.dev/vvhan/ipv6.txt
     kind: ip
+- name: cfyes-V6
+    url: https://bestcf.pages.dev/cfyes/ipv6.txt
+    kind: ip
 
 template:
   uuid: "2a2038c5-a62c-4f59-af4f-733426d37193"
